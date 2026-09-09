@@ -1,6 +1,11 @@
 This repo contains code to analyze rednoise across the CHAMPSS system. The actual rednoise files are too large to stay on GitHub and so will not be uploaded.
 
-
+# Dependencies
+- `numpy` (duh)
+- `h5py`
+- `tqdm`
+- `pytest` if you want to use the unit tests
+  
 # `./scripts/combine_rednoise_medians.py`
 This program searches a directory structure like the one we use for CHAMPSS storage and combines individual medians.npz files into one VERY large `hdf5` file that can then be referenced more easily for analysis. This will definitely need fiddling with for your specific directory structure.
 
