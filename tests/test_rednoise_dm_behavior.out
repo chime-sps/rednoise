@@ -1,0 +1,481 @@
+============================= test session starts ==============================
+platform linux -- Python 3.10.12, pytest-7.4.4, pluggy-1.6.0 -- /home/squillace/champss_software/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /home/squillace/rednoise/tests
+plugins: anyio-4.13.0, cov-7.1.0
+collecting ... collected 7 items
+
+test_rednoise_dm_behavior.py::test_scale_is_written_and_matches_source FAILED [ 14%]
+test_rednoise_dm_behavior.py::test_scale_plural_key_is_also_used FAILED  [ 28%]
+test_rednoise_dm_behavior.py::test_missing_scale_dataset_fills_minus_one_without_crashing FAILED [ 42%]
+test_rednoise_dm_behavior.py::test_corrupted_medians_rows_are_skipped_and_scale_stays_aligned FAILED [ 57%]
+test_rednoise_dm_behavior.py::test_mismatched_dataset_lengths_use_the_minimum FAILED [ 71%]
+test_rednoise_dm_behavior.py::test_chunking_does_not_change_the_result FAILED [ 85%]
+test_rednoise_dm_behavior.py::test_output_array_memory_matches_expected_formula FAILED [100%]
+
+=================================== FAILURES ===================================
+___________________ test_scale_is_written_and_matches_source ___________________
+
+tmp_path = PosixPath('/tmp/pytest-of-squillace/pytest-4/test_scale_is_written_and_matc0')
+
+    def test_scale_is_written_and_matches_source(tmp_path):
+        """
+        The new 'scale' output array should appear in the npz, with the right
+        shape, and match the source h5 file's 'scale' dataset exactly within
+        each row's valid n_freq region -- and be -1 past it, same padding
+        convention as the source.
+        """
+        h5_path = tmp_path / "combined.h5"
+        out_path = tmp_path / "out.npz"
+        medians, scale, n_dm, n_freq = build_combined_medians_h5(h5_path, N=10, max_freq=8)
+    
+        run_main(h5_path, out_path, chunk_size=4)
+        npz = np.load(out_path)
+    
+>       assert "scale" in npz.files
+E       AssertionError: assert 'scale' in ['info', 'median_across_dms', 'std_across_dms', 'min_across_dms', 'max_across_dms']
+E        +  where ['info', 'median_across_dms', 'std_across_dms', 'min_across_dms', 'max_across_dms'] = NpzFile '/tmp/pytest-of-squillace/pytest-4/test_scale_is_written_and_matc0/out.npz' with keys: info, median_across_dms, std_across_dms, min_across_dms, max_across_dms.files
+
+test_rednoise_dm_behavior.py:126: AssertionError
+----------------------------- Captured stdout call -----------------------------
+10 total rows.
+Chunk size: 4 rows  (~14 MB per chunk)
+  Chunk 1/3: rows 0–3
+  Chunk 2/3: rows 4–7
+  Chunk 3/3: rows 8–9
+Saving to /tmp/pytest-of-squillace/pytest-4/test_scale_is_written_and_matc0/out.npz ...
+Done.
+______________________ test_scale_plural_key_is_also_used ______________________
+
+tmp_path = PosixPath('/tmp/pytest-of-squillace/pytest-4/test_scale_plural_key_is_also_0')
+
+    def test_scale_plural_key_is_also_used(tmp_path):
+        """
+        The source medians.npz files (and hence some combined h5 files) may use
+        "scales" (plural) instead of "scale". The script should find either.
+        """
+        h5_path = tmp_path / "combined.h5"
+        out_path = tmp_path / "out.npz"
+        _, scale, _, n_freq = build_combined_medians_h5(
+            h5_path, N=5, max_freq=6, scale_key="scales"
+        )
+    
+        run_main(h5_path, out_path, chunk_size=2)
+        npz = np.load(out_path)
+    
+        for i in range(5):
+            nf = int(n_freq[i])
+>           np.testing.assert_allclose(npz["scale"][i, :nf], scale[i, :nf])
+
+test_rednoise_dm_behavior.py:157: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = NpzFile '/tmp/pytest-of-squillace/pytest-4/test_scale_plural_key_is_also_0/out.npz' with keys: info, median_across_dms, std_across_dms, min_across_dms, max_across_dms
+key = 'scale'
+
+    def __getitem__(self, key):
+        # FIXME: This seems like it will copy strings around
+        #   more than is strictly necessary.  The zipfile
+        #   will read the string and then
+        #   the format.read_array will copy the string
+        #   to another place in memory.
+        #   It would be better if the zipfile could read
+        #   (or at least uncompress) the data
+        #   directly into the array memory.
+        member = False
+        if key in self._files:
+            member = True
+        elif key in self.files:
+            member = True
+            key += '.npy'
+        if member:
+            bytes = self.zip.open(key)
+            magic = bytes.read(len(format.MAGIC_PREFIX))
+            bytes.close()
+            if magic == format.MAGIC_PREFIX:
+                bytes = self.zip.open(key)
+                return format.read_array(bytes,
+                                         allow_pickle=self.allow_pickle,
+                                         pickle_kwargs=self.pickle_kwargs,
+                                         max_header_size=self.max_header_size)
+            else:
+                return self.zip.read(key)
+        else:
+>           raise KeyError(f"{key} is not a file in the archive")
+E           KeyError: 'scale is not a file in the archive'
+
+../../champss_software/.venv/lib/python3.10/site-packages/numpy/lib/npyio.py:263: KeyError
+----------------------------- Captured stdout call -----------------------------
+5 total rows.
+Chunk size: 2 rows  (~7 MB per chunk)
+  Chunk 1/3: rows 0–1
+  Chunk 2/3: rows 2–3
+  Chunk 3/3: rows 4–4
+Saving to /tmp/pytest-of-squillace/pytest-4/test_scale_plural_key_is_also_0/out.npz ...
+Done.
+_________ test_missing_scale_dataset_fills_minus_one_without_crashing __________
+
+tmp_path = PosixPath('/tmp/pytest-of-squillace/pytest-4/test_missing_scale_dataset_fil0')
+
+    def test_missing_scale_dataset_fills_minus_one_without_crashing(tmp_path):
+        """
+        An older combined medians file with no 'scale'/'scales' dataset at all
+        should not crash the script -- the output 'scale' array should just be
+        entirely -1 (the same "unknown" sentinel used elsewhere in this file
+        format), and the rest of the output should be computed normally.
+        """
+        h5_path = tmp_path / "combined.h5"
+        out_path = tmp_path / "out.npz"
+        build_combined_medians_h5(h5_path, N=5, max_freq=6, scale_key=None)
+    
+        run_main(h5_path, out_path, chunk_size=2)
+        npz = np.load(out_path)
+    
+>       assert np.all(npz["scale"] == -1.0)
+
+test_rednoise_dm_behavior.py:174: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = NpzFile '/tmp/pytest-of-squillace/pytest-4/test_missing_scale_dataset_fil0/out.npz' with keys: info, median_across_dms, std_across_dms, min_across_dms, max_across_dms
+key = 'scale'
+
+    def __getitem__(self, key):
+        # FIXME: This seems like it will copy strings around
+        #   more than is strictly necessary.  The zipfile
+        #   will read the string and then
+        #   the format.read_array will copy the string
+        #   to another place in memory.
+        #   It would be better if the zipfile could read
+        #   (or at least uncompress) the data
+        #   directly into the array memory.
+        member = False
+        if key in self._files:
+            member = True
+        elif key in self.files:
+            member = True
+            key += '.npy'
+        if member:
+            bytes = self.zip.open(key)
+            magic = bytes.read(len(format.MAGIC_PREFIX))
+            bytes.close()
+            if magic == format.MAGIC_PREFIX:
+                bytes = self.zip.open(key)
+                return format.read_array(bytes,
+                                         allow_pickle=self.allow_pickle,
+                                         pickle_kwargs=self.pickle_kwargs,
+                                         max_header_size=self.max_header_size)
+            else:
+                return self.zip.read(key)
+        else:
+>           raise KeyError(f"{key} is not a file in the archive")
+E           KeyError: 'scale is not a file in the archive'
+
+../../champss_software/.venv/lib/python3.10/site-packages/numpy/lib/npyio.py:263: KeyError
+----------------------------- Captured stdout call -----------------------------
+5 total rows.
+Chunk size: 2 rows  (~7 MB per chunk)
+  Chunk 1/3: rows 0–1
+  Chunk 2/3: rows 2–3
+  Chunk 3/3: rows 4–4
+Saving to /tmp/pytest-of-squillace/pytest-4/test_missing_scale_dataset_fil0/out.npz ...
+Done.
+_______ test_corrupted_medians_rows_are_skipped_and_scale_stays_aligned ________
+
+tmp_path = PosixPath('/tmp/pytest-of-squillace/pytest-4/test_corrupted_medians_rows_ar0')
+
+    def test_corrupted_medians_rows_are_skipped_and_scale_stays_aligned(tmp_path):
+        """
+        When a chunk read of 'medians' raises OSError (simulated here via
+        mock, matching a real mid-write-killed HDF5 chunk), the script should
+        fall back to row-by-row reads, skip only the corrupted rows, and leave
+        them at their pre-allocated defaults (0 for the DM stats, -1 for scale)
+        -- while every other row in the same chunk, including its 'scale' entry,
+        is still computed correctly and stays aligned with the right row index.
+        """
+        h5_path = tmp_path / "combined.h5"
+        out_path = tmp_path / "out.npz"
+        medians, scale, n_dm, n_freq = build_combined_medians_h5(h5_path, N=8, max_freq=6)
+    
+        corrupt_rows = {2, 5}
+        real_getitem = h5py.Dataset.__getitem__
+    
+        def flaky_getitem(self, key):
+            if self.name.endswith("medians"):
+                touched = set()
+                if isinstance(key, slice):
+                    start, stop, step = key.indices(self.shape[0])
+                    touched = set(range(start, stop, step or 1))
+                elif isinstance(key, int):
+                    touched = {key}
+                if touched & corrupt_rows:
+                    raise OSError("inflate() failed (simulated corruption)")
+            return real_getitem(self, key)
+    
+        with patch.object(h5py.Dataset, "__getitem__", flaky_getitem):
+            run_main(h5_path, out_path, chunk_size=4)
+    
+        npz = np.load(out_path)
+        for i in range(8):
+            nf = int(n_freq[i])
+            if i in corrupt_rows:
+                assert np.all(npz["scale"][i] == -1.0), f"row {i} scale should be left at default"
+                assert np.all(npz["median_across_dms"][i] == 0.0), f"row {i} median should be left at default"
+            else:
+>               np.testing.assert_allclose(npz["scale"][i, :nf], scale[i, :nf])
+
+test_rednoise_dm_behavior.py:216: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = NpzFile '/tmp/pytest-of-squillace/pytest-4/test_corrupted_medians_rows_ar0/out.npz' with keys: info, median_across_dms, std_across_dms, min_across_dms, max_across_dms
+key = 'scale'
+
+    def __getitem__(self, key):
+        # FIXME: This seems like it will copy strings around
+        #   more than is strictly necessary.  The zipfile
+        #   will read the string and then
+        #   the format.read_array will copy the string
+        #   to another place in memory.
+        #   It would be better if the zipfile could read
+        #   (or at least uncompress) the data
+        #   directly into the array memory.
+        member = False
+        if key in self._files:
+            member = True
+        elif key in self.files:
+            member = True
+            key += '.npy'
+        if member:
+            bytes = self.zip.open(key)
+            magic = bytes.read(len(format.MAGIC_PREFIX))
+            bytes.close()
+            if magic == format.MAGIC_PREFIX:
+                bytes = self.zip.open(key)
+                return format.read_array(bytes,
+                                         allow_pickle=self.allow_pickle,
+                                         pickle_kwargs=self.pickle_kwargs,
+                                         max_header_size=self.max_header_size)
+            else:
+                return self.zip.read(key)
+        else:
+>           raise KeyError(f"{key} is not a file in the archive")
+E           KeyError: 'scale is not a file in the archive'
+
+../../champss_software/.venv/lib/python3.10/site-packages/numpy/lib/npyio.py:263: KeyError
+----------------------------- Captured stdout call -----------------------------
+8 total rows.
+Chunk size: 4 rows  (~14 MB per chunk)
+  Chunk 1/2: rows 0–3
+  [WARN] Chunk read failed (inflate() failed (simulated corruption)); falling back to row-by-row reads.
+    [SKIP] Corrupted row 2
+  Chunk 2/2: rows 4–7
+  [WARN] Chunk read failed (inflate() failed (simulated corruption)); falling back to row-by-row reads.
+    [SKIP] Corrupted row 5
+Saving to /tmp/pytest-of-squillace/pytest-4/test_corrupted_medians_rows_ar0/out.npz ...
+Done.
+_______________ test_mismatched_dataset_lengths_use_the_minimum ________________
+
+tmp_path = PosixPath('/tmp/pytest-of-squillace/pytest-4/test_mismatched_dataset_length0')
+
+    def test_mismatched_dataset_lengths_use_the_minimum(tmp_path):
+        """
+        If 'scale' (or any other dataset) is shorter than 'medians' -- e.g. from
+        a process killed mid-batch -- the script should process only the
+        consistent prefix (min length across all datasets, now including
+        scale), not crash or silently read past the end of the shorter one.
+        """
+        h5_path = tmp_path / "combined.h5"
+        out_path = tmp_path / "out.npz"
+        build_combined_medians_h5(h5_path, N=10, max_freq=6)
+    
+        # Truncate 'scale' and 'ra' after the fact to simulate an inconsistent file.
+        with h5py.File(h5_path, "a") as h5:
+            scale_data = h5["scale"][:7]
+            ra_data = h5["ra"][:9]
+            del h5["scale"]
+            del h5["ra"]
+            h5.create_dataset("scale", data=scale_data)
+            h5.create_dataset("ra", data=ra_data)
+    
+        run_main(h5_path, out_path, chunk_size=3)
+        npz = np.load(out_path)
+    
+>       assert npz["info"].shape[0] == 7
+E       assert 9 == 7
+
+test_rednoise_dm_behavior.py:246: AssertionError
+----------------------------- Captured stdout call -----------------------------
+9 total rows.
+Chunk size: 3 rows  (~10 MB per chunk)
+  Chunk 1/3: rows 0–2
+  Chunk 2/3: rows 3–5
+  Chunk 3/3: rows 6–8
+Saving to /tmp/pytest-of-squillace/pytest-4/test_mismatched_dataset_length0/out.npz ...
+Done.
+___________________ test_chunking_does_not_change_the_result ___________________
+
+tmp_path = PosixPath('/tmp/pytest-of-squillace/pytest-4/test_chunking_does_not_change_0')
+
+    def test_chunking_does_not_change_the_result(tmp_path):
+        """
+        Regression guard: processing the same file in one big chunk vs. several
+        small chunks should produce byte-identical output, for every array
+        including the new 'scale' one. This is what actually matters about
+        "chunked processing" -- it should be purely a RAM/performance knob.
+        """
+        h5_path = tmp_path / "combined.h5"
+        out_single = tmp_path / "out_single.npz"
+        out_chunked = tmp_path / "out_chunked.npz"
+        N = 11
+        build_combined_medians_h5(h5_path, N=N, max_dm=5, max_freq=7)
+    
+        run_main(h5_path, out_single, chunk_size=N)   # one chunk covers everything
+        run_main(h5_path, out_chunked, chunk_size=3)  # N=11 is not a multiple of 3
+    
+        single = np.load(out_single)
+        chunked = np.load(out_chunked)
+        for key in ("info", "median_across_dms", "std_across_dms",
+                    "min_across_dms", "max_across_dms", "scale"):
+>           np.testing.assert_array_equal(single[key], chunked[key])
+
+test_rednoise_dm_behavior.py:270: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = NpzFile '/tmp/pytest-of-squillace/pytest-4/test_chunking_does_not_change_0/out_single.npz' with keys: info, median_across_dms, std_across_dms, min_across_dms, max_across_dms
+key = 'scale'
+
+    def __getitem__(self, key):
+        # FIXME: This seems like it will copy strings around
+        #   more than is strictly necessary.  The zipfile
+        #   will read the string and then
+        #   the format.read_array will copy the string
+        #   to another place in memory.
+        #   It would be better if the zipfile could read
+        #   (or at least uncompress) the data
+        #   directly into the array memory.
+        member = False
+        if key in self._files:
+            member = True
+        elif key in self.files:
+            member = True
+            key += '.npy'
+        if member:
+            bytes = self.zip.open(key)
+            magic = bytes.read(len(format.MAGIC_PREFIX))
+            bytes.close()
+            if magic == format.MAGIC_PREFIX:
+                bytes = self.zip.open(key)
+                return format.read_array(bytes,
+                                         allow_pickle=self.allow_pickle,
+                                         pickle_kwargs=self.pickle_kwargs,
+                                         max_header_size=self.max_header_size)
+            else:
+                return self.zip.read(key)
+        else:
+>           raise KeyError(f"{key} is not a file in the archive")
+E           KeyError: 'scale is not a file in the archive'
+
+../../champss_software/.venv/lib/python3.10/site-packages/numpy/lib/npyio.py:263: KeyError
+----------------------------- Captured stdout call -----------------------------
+11 total rows.
+Chunk size: 11 rows  (~38 MB per chunk)
+  Chunk 1/1: rows 0–10
+Saving to /tmp/pytest-of-squillace/pytest-4/test_chunking_does_not_change_0/out_single.npz ...
+Done.
+11 total rows.
+Chunk size: 3 rows  (~10 MB per chunk)
+  Chunk 1/4: rows 0–2
+  Chunk 2/4: rows 3–5
+  Chunk 3/4: rows 6–8
+  Chunk 4/4: rows 9–10
+Saving to /tmp/pytest-of-squillace/pytest-4/test_chunking_does_not_change_0/out_chunked.npz ...
+Done.
+______________ test_output_array_memory_matches_expected_formula _______________
+
+tmp_path = PosixPath('/tmp/pytest-of-squillace/pytest-4/test_output_array_memory_match0')
+
+    def test_output_array_memory_matches_expected_formula(tmp_path):
+        """
+        Characterization test for the script's memory footprint (see the
+        accompanying review): the five (N, max_n_freq) output arrays plus the
+        (N, 7) info array are fully materialized in RAM for ALL N rows before
+        the single np.savez_compressed() call -- chunking only bounds the
+        *input* read, not this accumulation. This test doesn't assert that's a
+        problem (it isn't, at the row counts this repo currently deals with),
+        but pins down the actual scaling so a future change that makes it worse
+        (e.g. an accidental extra full-array copy) gets caught.
+        """
+        h5_path = tmp_path / "combined.h5"
+        out_path = tmp_path / "out.npz"
+        N, max_freq = 20, 9
+        build_combined_medians_h5(h5_path, N=N, max_freq=max_freq)
+    
+        run_main(h5_path, out_path, chunk_size=4)
+        npz = np.load(out_path)
+    
+        per_freq_arrays = ["median_across_dms", "std_across_dms",
+                           "min_across_dms", "max_across_dms", "scale"]
+        expected_bytes_per_freq_array = N * max_freq * 4  # float32
+        for key in per_freq_arrays:
+>           assert npz[key].nbytes == expected_bytes_per_freq_array, (
+                f"{key} is {npz[key].nbytes} bytes, expected "
+                f"{expected_bytes_per_freq_array} (N * max_n_freq * 4 bytes); "
+                f"if this changed, the script's O(N) output memory footprint did too."
+            )
+
+test_rednoise_dm_behavior.py:296: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = NpzFile '/tmp/pytest-of-squillace/pytest-4/test_output_array_memory_match0/out.npz' with keys: info, median_across_dms, std_across_dms, min_across_dms, max_across_dms
+key = 'scale'
+
+    def __getitem__(self, key):
+        # FIXME: This seems like it will copy strings around
+        #   more than is strictly necessary.  The zipfile
+        #   will read the string and then
+        #   the format.read_array will copy the string
+        #   to another place in memory.
+        #   It would be better if the zipfile could read
+        #   (or at least uncompress) the data
+        #   directly into the array memory.
+        member = False
+        if key in self._files:
+            member = True
+        elif key in self.files:
+            member = True
+            key += '.npy'
+        if member:
+            bytes = self.zip.open(key)
+            magic = bytes.read(len(format.MAGIC_PREFIX))
+            bytes.close()
+            if magic == format.MAGIC_PREFIX:
+                bytes = self.zip.open(key)
+                return format.read_array(bytes,
+                                         allow_pickle=self.allow_pickle,
+                                         pickle_kwargs=self.pickle_kwargs,
+                                         max_header_size=self.max_header_size)
+            else:
+                return self.zip.read(key)
+        else:
+>           raise KeyError(f"{key} is not a file in the archive")
+E           KeyError: 'scale is not a file in the archive'
+
+../../champss_software/.venv/lib/python3.10/site-packages/numpy/lib/npyio.py:263: KeyError
+----------------------------- Captured stdout call -----------------------------
+20 total rows.
+Chunk size: 4 rows  (~14 MB per chunk)
+  Chunk 1/5: rows 0–3
+  Chunk 2/5: rows 4–7
+  Chunk 3/5: rows 8–11
+  Chunk 4/5: rows 12–15
+  Chunk 5/5: rows 16–19
+Saving to /tmp/pytest-of-squillace/pytest-4/test_output_array_memory_match0/out.npz ...
+Done.
+=========================== short test summary info ============================
+FAILED test_rednoise_dm_behavior.py::test_scale_is_written_and_matches_source
+FAILED test_rednoise_dm_behavior.py::test_scale_plural_key_is_also_used - Key...
+FAILED test_rednoise_dm_behavior.py::test_missing_scale_dataset_fills_minus_one_without_crashing
+FAILED test_rednoise_dm_behavior.py::test_corrupted_medians_rows_are_skipped_and_scale_stays_aligned
+FAILED test_rednoise_dm_behavior.py::test_mismatched_dataset_lengths_use_the_minimum
+FAILED test_rednoise_dm_behavior.py::test_chunking_does_not_change_the_result
+FAILED test_rednoise_dm_behavior.py::test_output_array_memory_matches_expected_formula
+============================== 7 failed in 0.81s ===============================
