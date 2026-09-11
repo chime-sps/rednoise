@@ -1,0 +1,12 @@
+============================= test session starts ==============================
+platform linux -- Python 3.10.12, pytest-7.4.4, pluggy-1.6.0 -- /home/squillace/champss_software/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /home/squillace/rednoise/tests
+plugins: anyio-4.13.0, cov-7.1.0
+collecting ... collected 3 items
+
+test_rednoise_skymap.py::test_flat_field_recovers_exact_value_away_from_edges PASSED [ 33%]
+test_rednoise_skymap.py::test_ra_180_seam_preserves_contrast_that_should_be_smoothed_out PASSED [ 66%]
+test_rednoise_skymap.py::test_high_declination_kernel_covers_larger_true_sky_area PASSED [100%]
+
+============================== 3 passed in 0.77s ===============================

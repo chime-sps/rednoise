@@ -1,0 +1,22 @@
+============================= test session starts ==============================
+platform linux -- Python 3.10.12, pytest-7.4.4, pluggy-1.6.0 -- /home/squillace/champss_software/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /home/squillace/rednoise/tests
+plugins: anyio-4.13.0, cov-7.1.0
+collecting ... collected 13 items
+
+test_combine_rednoise_medians.py::TestOutputFileStructure::test_output_file_opens_and_has_expected_datasets PASSED [  7%]
+test_combine_rednoise_medians.py::TestOutputFileStructure::test_dataset_shapes_and_dtypes PASSED [ 15%]
+test_combine_rednoise_medians.py::TestOutputFileStructure::test_attrs_present_and_correct PASSED [ 23%]
+test_combine_rednoise_medians.py::TestScaleField::test_scale_reduced_correctly_for_each_dimensionality[1] PASSED [ 30%]
+test_combine_rednoise_medians.py::TestScaleField::test_scale_reduced_correctly_for_each_dimensionality[2] PASSED [ 38%]
+test_combine_rednoise_medians.py::TestScaleField::test_scale_reduced_correctly_for_each_dimensionality[3] PASSED [ 46%]
+test_combine_rednoise_medians.py::TestScaleField::test_scale_key_fallback_singular PASSED [ 53%]
+test_combine_rednoise_medians.py::TestScaleField::test_missing_scale_key_stores_sentinel PASSED [ 61%]
+test_combine_rednoise_medians.py::TestScaleField::test_scale_padding_beyond_n_freq_is_sentinel PASSED [ 69%]
+test_combine_rednoise_medians.py::TestSlicingConvention::test_medians_and_scale_slice_to_exact_original_data PASSED [ 76%]
+test_combine_rednoise_medians.py::TestResume::test_resume_skips_already_written_files PASSED [ 84%]
+test_combine_rednoise_medians.py::TestResume::test_resume_grows_padded_shape_for_larger_later_file PASSED [ 92%]
+test_combine_rednoise_medians.py::TestNFilesLimit::test_n_files_limits_total_pointings_written PASSED [100%]
+
+============================== 13 passed in 0.48s ==============================

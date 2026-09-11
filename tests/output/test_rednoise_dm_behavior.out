@@ -1,0 +1,16 @@
+============================= test session starts ==============================
+platform linux -- Python 3.10.12, pytest-7.4.4, pluggy-1.6.0 -- /home/squillace/champss_software/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /home/squillace/rednoise/tests
+plugins: anyio-4.13.0, cov-7.1.0
+collecting ... collected 7 items
+
+test_rednoise_dm_behavior.py::test_scale_is_written_and_matches_source PASSED [ 14%]
+test_rednoise_dm_behavior.py::test_scale_plural_key_is_also_used PASSED  [ 28%]
+test_rednoise_dm_behavior.py::test_missing_scale_dataset_fills_minus_one_without_crashing PASSED [ 42%]
+test_rednoise_dm_behavior.py::test_corrupted_medians_rows_are_skipped_and_scale_stays_aligned PASSED [ 57%]
+test_rednoise_dm_behavior.py::test_mismatched_dataset_lengths_use_the_minimum PASSED [ 71%]
+test_rednoise_dm_behavior.py::test_chunking_does_not_change_the_result PASSED [ 85%]
+test_rednoise_dm_behavior.py::test_output_array_memory_matches_expected_formula PASSED [100%]
+
+============================== 7 passed in 0.33s ===============================
