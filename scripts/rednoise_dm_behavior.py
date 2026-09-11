@@ -13,6 +13,13 @@ Output (rednoise_dm_info.npz):
     std_across_dms    : (N, max_n_freq) float32
     min_across_dms    : (N, max_n_freq) float32
     max_across_dms    : (N, max_n_freq) float32
+    scale             : (N, max_n_freq) float32 -- copied directly from the
+                                        combined medians file's "scale"
+                                        (or "scales") dataset, -1 padded past
+                                        each row's valid n_freq entries. This
+                                        is per-pointing rebinning info, not a
+                                        DM-axis statistic, so it's carried
+                                        through unchanged rather than reduced.
 
 Usage
 -----
@@ -95,6 +102,39 @@ def process_chunk(chunk_medians, chunk_n_dm, chunk_n_freq, max_n_freq):
             median_out, std_out, min_out, max_out)
 
 
+def _read_rows(dataset, start, end, good_rows):
+    """
+    Read `good_rows` (a subset of range(start, end)) from an HDF5 dataset.
+
+    Uses a single bulk slice read when good_rows is the full contiguous
+    range (the common case), and falls back to per-row reads otherwise --
+    e.g. when an earlier read of a *different* dataset for this same chunk
+    (typically "medians") already hit corrupted rows and good_rows was
+    narrowed down to skip them, so this dataset's read stays aligned with
+    whatever rows are actually being kept for this chunk.
+    """
+    if good_rows == list(range(start, end)):
+        return dataset[start:end]
+    return np.concatenate([dataset[r:r + 1] for r in good_rows], axis=0)
+
+
+def _find_scale_key(h5):
+    """
+    Return the name of the per-pointing rebinning-scale dataset in the
+    combined medians file, or None if it isn't present.
+
+    combine_rednoise_medians.py writes this out as "scale" (singular), but
+    the source medians.npz files carry it as "scales" (plural) -- check
+    both, matching the flexibility already used elsewhere for this dataset
+    (e.g. rednoise_skymap.py's load_exposure_lookup()).
+    """
+    if "scales" in h5:
+        return "scales"
+    if "scale" in h5:
+        return "scale"
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -113,18 +153,27 @@ def main():
         sys.exit(f"File not found: {h5_path}")
 
     with h5py.File(h5_path, "r") as h5:
+        scale_key = _find_scale_key(h5)
+        if scale_key is None:
+            print("  [WARN] No 'scale'/'scales' dataset found in the combined "
+                  "medians file; the output 'scale' array will be filled with -1.",
+                  flush=True)
+
         # FIX: use the minimum length across all datasets rather than trusting
         # medians.shape[0] alone.  If the process was killed mid-batch, medians
         # may have been resized before ra/dec/etc. were updated, leaving the
         # datasets out of sync by one batch (500 rows in the observed case).
-        total_rows = min(
+        row_count_datasets = [
             h5["medians"].shape[0],
             h5["ra"].shape[0],
             h5["dec"].shape[0],
             h5["year"].shape[0],
             h5["n_dm"].shape[0],
             h5["n_freq"].shape[0],
-        )
+        ]
+        if scale_key is not None:
+            row_count_datasets.append(h5[scale_key].shape[0])
+        total_rows = min(row_count_datasets)
         max_n_freq = int(h5.attrs["max_n_freq"])   # padded freq axis size
 
         N = min(args.max_rows, total_rows) if args.max_rows else total_rows
@@ -150,11 +199,25 @@ def main():
         n_freq_arr = h5["n_freq"][:N]
 
         # Pre-allocate output arrays.
-        output_stats     = np.zeros((N, 7),           dtype=np.float64)
+        # NOTE ON MEMORY: unlike "medians" above, these six arrays are NOT
+        # chunked -- they hold every one of the N rows for the whole run,
+        # so (--chunk-size only bounds the *input* read). Total footprint is
+        # roughly N * max_n_freq * 4 bytes * 5 (the float32 per-freq arrays,
+        # now including "scale") + N * 7 * 8 bytes (output_stats). At
+        # max_n_freq=51 that's ~1 KB/row; for N=2,000,000 rows, ~2 GB held
+        # in RAM at once, independent of --chunk-size. Fine at today's row
+        # counts, but worth knowing before pointing this at a much bigger
+        # combined_medians.h5 -- see test_output_array_memory_matches_expected_formula
+        # in test_rednoise_dm_behavior.py, which pins down this scaling.
+        output_stats      = np.zeros((N, 7),           dtype=np.float64)
         median_across_dms = np.zeros((N, max_n_freq), dtype=np.float32)
         std_across_dms    = np.zeros((N, max_n_freq), dtype=np.float32)
         min_across_dms    = np.zeros((N, max_n_freq), dtype=np.float32)
         max_across_dms    = np.zeros((N, max_n_freq), dtype=np.float32)
+        # -1 sentinel (not 0) so an unfilled/missing entry can't be mistaken
+        # for a real scale value, matching the padding convention the
+        # combined medians file itself uses for this dataset.
+        scale_across_freq = np.full((N, max_n_freq), -1.0, dtype=np.float32)
 
         # Fill metadata columns now (no need to revisit these per chunk).
         output_stats[:, 0] = ra_arr
@@ -198,6 +261,24 @@ def main():
             local_n_dm   = n_dm_arr[good_rows]
             local_n_freq = n_freq_arr[good_rows]
 
+            # Read this chunk's scale rows, staying aligned with whatever
+            # good_rows the medians read above settled on. A corrupted scale
+            # read is non-fatal -- unlike medians, it isn't needed to compute
+            # the DM statistics, so fall back to -1 (already the default)
+            # for just this chunk rather than dropping otherwise-good rows.
+            if scale_key is not None:
+                try:
+                    chunk_scale = _read_rows(h5[scale_key], start, end, good_rows)
+                except OSError as e:
+                    print(f"  [WARN] Scale chunk read failed ({e}); "
+                          f"leaving scale as -1 for rows {start}-{end-1}.",
+                          flush=True)
+                    chunk_scale = np.full((len(good_rows), max_n_freq), -1.0,
+                                           dtype=np.float32)
+            else:
+                chunk_scale = np.full((len(good_rows), max_n_freq), -1.0,
+                                       dtype=np.float32)
+
             (mins_match, threshold_dm_idx,
              median_c, std_c, min_c, max_c) = process_chunk(
                 chunk_medians,
@@ -213,9 +294,10 @@ def main():
                 std_across_dms[row]         = std_c[out_idx]
                 min_across_dms[row]         = min_c[out_idx]
                 max_across_dms[row]         = max_c[out_idx]
+                scale_across_freq[row]      = chunk_scale[out_idx]
 
             # Explicitly free the chunk to avoid accumulation between iterations.
-            del chunk_medians
+            del chunk_medians, chunk_scale
 
     print(f"Saving to {args.output} ...", flush=True)
     np.savez_compressed(
@@ -225,6 +307,7 @@ def main():
         std_across_dms    = std_across_dms,
         min_across_dms    = min_across_dms,
         max_across_dms    = max_across_dms,
+        scale             = scale_across_freq,
     )
     print("Done.", flush=True)
 
