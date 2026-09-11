@@ -20,3 +20,9 @@ Test that the resume feature works:
 If this works, go for the full thing...
 `python3 combine_rednoise_medians.py /mnt/beegfs-client/processed/ -o omg_its_the_real_run.h5`
 ...and you can resume it where it left off if it dropped, aside from the directory searching, which does have to run every time.
+
+## `./scripts/rednoise_dm_behavior.py`
+This program synthesizes a lot of the information contained in the output h5 file of `combine_rednoise_medians.py` with the assumption that you are most interested in behavior as a function of DM. Many of the other programs take the output of this program as an input rather than the whole medians file. This uses chunking to avoid overwhelming the RAM.
+
+Example:
+`python3 combine_rednoise_medians.py /path/to/your/h5/file`
