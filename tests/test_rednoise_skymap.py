@@ -1,4 +1,6 @@
 """
+NOTE: THIS UNIT TEST WAS WRITTEN BY CLAUDE.
+
 Unit tests for grid_and_smooth() in rednoise_skymap.py, targeting artifacts
 of its sky projection that distort dynamic range in the resulting skymap,
 ahead of the Mollweide plot.
