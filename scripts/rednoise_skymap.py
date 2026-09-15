@@ -3,8 +3,10 @@
 This module reads a rednoise info file and produces the following plots:
 
     1. Skymap: mean across all days of the sum across all frequency bins > 5 of the
-       median of the medians across all DMs. We bin onto a HEALPix grid and then
-       smooth with a Gaussian beam of customizable size, then project via Mollweide.
+       median of the medians across all DMs. Each displayed sky position is a
+       real-space, great-circle-distance Gaussian-weighted average ("kernel
+       regression") of nearby pointings, with a customizable kernel width,
+       then projected via Mollweide.
     2. Coverage map: one dot per saved pointing.
 
 The mean across days is weighted by each day's exposure length T_exp, since
@@ -31,7 +33,6 @@ from pathlib import Path
 
 import click
 import h5py
-import healpy as hp
 import numpy as np
 from scipy.spatial import cKDTree
 
@@ -138,14 +139,12 @@ def load_data(npz_path: Path, h5_path: Path):
     # pointing-day (n_dm == 0, e.g. a short/corrupted observation) has
     # np.median() of an empty slice baked into its median_across_dms row,
     # which is NaN -- so rn_sum is NaN for that row too. This is rare but
-    # real at survey scale (millions of rows), and it matters a lot more
-    # here than a normal bad-value would: even a single NaN pointing
-    # reaching grid_and_smooth() poisons hp.smoothing()'s spherical-
-    # harmonic transform for the *entire* sky (unlike a real-space filter,
-    # which would only spoil nearby pixels), silently turning every output
-    # value into NaN. Drop those rows here, with the count surfaced, rather
-    # than letting them propagate into a confusing failure several
-    # functions away.
+    # real at survey scale (millions of rows). grid_and_smooth()'s kernel
+    # regression would fold a NaN value into the weighted average of every
+    # display cell within reach of that one pointing, NaN-ing out an entire
+    # (otherwise perfectly good) neighborhood around it. Drop those rows
+    # here, with the count surfaced, rather than letting them propagate
+    # into a confusing failure several functions away.
     bad_rn = ~np.isfinite(rn_sum)
     n_bad_rn = np.sum(bad_rn)
     if n_bad_rn:
@@ -211,76 +210,73 @@ def load_data(npz_path: Path, h5_path: Path):
 # OK now we are doing our fun density stuff!
 # --------
 
-def grid_and_smooth(ra, dec, values, smooth_deg, nside=128, display_resolution=0.25,
+def grid_and_smooth(ra, dec, values, smooth_deg, display_resolution=0.25,
                      mask_radius_deg=None):
     '''
-    This function bins pointings onto a HEALPix grid and then smoothes the
-    mean values across all pointings with a Gaussian beam, before resampling
-    onto a regular lon/dec grid for display.
+    This function evaluates a real-space Gaussian-weighted average ("kernel
+    regression") of `values` at every point of a regular lon/dec display
+    grid, using true great-circle distance from each grid point to every
+    actual input pointing.
 
-    HEALPix is an equal-area, iso-latitude pixelization of the sphere, so
-    (unlike the plain RA/Dec Cartesian binning this replaces) it has neither
-    of the two projection artifacts that plain Cartesian binning+smoothing
-    has to be specially corrected for:
+    Concretely, for a display cell at true angular distance d_i from input
+    pointing i (i = 1..N), the displayed value is:
 
-    1. RA=180 seam: HEALPix pixels and hp.smoothing()'s spherical-harmonic
-       beam convolution have no notion of an RA=0/360 boundary at all --
-       there is no array edge in longitude for two nearby points to land on
-       opposite sides of.
-    2. High declination / poles: HEALPix pixels have (approximately) equal
-       true sky area everywhere, including near the poles, so a
-       fixed-angle Gaussian beam smooths a constant true sky area
-       regardless of declination, unlike a fixed-degree-of-RA kernel on a
-       Cartesian grid.
+        sum_i( w_i * values_i ) / sum_i( w_i ),   w_i = exp(-0.5 * (d_i / sigma)^2)
 
-    Binning: each pointing's `values` entry is accumulated into its HEALPix
-    pixel's running sum, alongside a hit-count map. Smoothing: hp.smoothing()
-    (a spherical-harmonic Gaussian beam of FWHM `smooth_deg`) is applied
-    separately to the sum map and the count map, so an isolated value is
-    still reproduced exactly. Display: the smoothed sum map and count map
-    are each resampled (still separately) onto a regular lon/dec grid via
-    hp.get_interp_val(), purely so the existing matplotlib Mollweide +
-    pcolormesh plotting code (with its custom RA-hour axis ticks) can be
-    reused unchanged. Only on that regular grid -- never before -- are they
-    divided and masked by coverage (accumulate-then-divide-by-coverage,
-    same pattern the old Cartesian version used). This order matters: an
-    earlier version of this function divided and coverage-masked (to NaN)
-    while still in HEALPix space, then interpolated that NaN-containing map
-    for display. Since hp.get_interp_val() bilinearly blends each display
-    point's 4 neighboring HEALPix pixels, and a weighted sum touching even
-    one NaN neighbor is itself NaN, that poisoned the display grid almost
-    everywhere on a real, only-partially-covered sky (most HEALPix pixels
-    at typical `nside` are never hit by an actual pointing) -- including
-    display cells sitting right on top of real data. See the module-level
-    concerns note delivered alongside this function for further tradeoffs
-    of the interpolate-then-display-grid design.
+    with sigma derived from `smooth_deg` (a FWHM, sigma = FWHM / sqrt(8 ln 2)),
+    and the sum restricted to pointings within `mask_radius_deg` (points
+    farther away contribute a weight of ~0 anyway; a display cell with NO
+    pointing within `mask_radius_deg` is left as NaN rather than assigning
+    it some vanishingly diluted, physically meaningless average of far-away
+    data).
+
+    This is a weighted MEAN of nearby data, which is why it is inherently
+    density-independent: if every pointing within reach of a display cell
+    happens to share the same true value V, the weighted mean returns
+    exactly V regardless of whether there's one contributing pointing or a
+    thousand -- coverage density only ever decides *which* cells have any
+    contributing pointings at all (and therefore get a value instead of
+    NaN), never what that value *is*. Real great-circle distance is also
+    inherently free of the two projection artifacts a naive RA/Dec
+    Cartesian grid has: there's no RA=0/360 array edge for an angular
+    distance calculation to trip over, and no cos(dec) foreshortening of
+    RA near the poles either.
+
+    This replaces an earlier HEALPix-based implementation
+    (bin -> hp.smoothing() -> hp.get_interp_val()), dropped for a real,
+    structural problem beyond the two implementation bugs already fixed in
+    it (NaN poisoning the whole sky; harmonic ringing "filling in" spurious
+    disconnected dots in real gaps): hp.smoothing()'s spherical-harmonic
+    transform is only an *approximation* of a true continuous convolution,
+    band-limited to a finite lmax, and that approximation does not cancel
+    exactly between the numerator (accumulated value) and denominator
+    (coverage count) of the old accumulate-then-divide-by-coverage ratio
+    right at a sharp coverage-density edge -- which is exactly what a real,
+    gappy drift-scan survey footprint looks like. The result was values
+    measurably biased toward zero at the tapering edge of a coverage
+    region, even though the true, density-independent value there should
+    equal whatever nearby pointings actually measured. An exact real-space
+    weighted average has no such bias, by construction, and removes the
+    healpy dependency entirely in the process.
 
     Inputs:
     -------
         ra (arr): 1D array of RAs
         dec (arr): 1D array of Decs
         values (arr): mean_rn from load_data()
-        smooth_deg (float): Gaussian beam FWHM, in degrees, to smooth by
-        nside (int): HEALPix resolution parameter; must be a power of 2.
-            Pixel size is roughly 58.6 / nside degrees. Higher nside means
-            finer pixels but a slower hp.smoothing() call.
+        smooth_deg (float): Gaussian kernel FWHM, in degrees
         display_resolution (float): spacing, in degrees, of the regular
-            lon/dec grid the smoothed HEALPix map is resampled onto for
-            plotting (independent of `nside`).
-        mask_radius_deg (float or None): a display cell farther than this
-            great-circle distance from the nearest *actual* input pointing
-            is always masked to NaN, regardless of what count_mesh says.
-            Defaults to 2 * smooth_deg (two beam widths) if None. This
-            guards against a real hp.smoothing() artifact: representing a
-            sparse, sharp-edged coverage pattern (real gaps between
-            drift-scan pointings) as a truncated spherical-harmonic series
-            can ring, occasionally swinging the smoothed count map back
-            *above* the coverage threshold in small, isolated spots well
-            inside a real gap -- painting spurious, disconnected "filled
-            in" dots with real-looking values in regions that have no data
-            at all. Real-space distance to actual data can't ring, so it's
-            what decides whether a cell is shown; the harmonic-smoothed
-            accum/count maps are still what decide the cell's *value*.
+            lon/dec grid the kernel regression is evaluated on
+        mask_radius_deg (float or None): a display cell is assigned a value
+            only if at least one actual input pointing lies within this
+            great-circle distance; farther cells are NaN. Defaults to
+            2 * smooth_deg (two beam widths) if None. This doubles as the
+            kernel's hard cutoff radius for tractability: at 2 * smooth_deg
+            a Gaussian's weight is already down to ~1.5e-5 of its peak, so
+            excluding farther pointings from the weighted average entirely
+            has no visible effect on the result -- unlike hp.smoothing()'s
+            harmonic-space truncation, a real-space hard cutoff of an
+            already-negligible tail doesn't ring.
 
     Returns:
     --------
@@ -288,23 +284,19 @@ def grid_and_smooth(ra, dec, values, smooth_deg, nside=128, display_resolution=0
             increasing from negative (east) to positive (west), spanning the
             full circle (RA is periodic).
         dec_grid (arr): 1-D array of Dec bin centres in degrees
-        smoothed (arr): 2-D array (n_dec, n_lon) of mean of sums of median etc at each pointing,
-            NaN where there is no nearby HEALPix coverage
+        smoothed (arr): 2-D array (n_dec, n_lon) of the kernel-weighted
+            average value at each display cell, NaN where no pointing is
+            within mask_radius_deg
     '''
-    if nside < 1 or (nside & (nside - 1)) != 0:
-        raise ValueError(f"nside must be a positive power of 2, got {nside}")
-
     ra = np.asarray(ra, dtype=np.float64)
     dec = np.asarray(dec, dtype=np.float64)
     values = np.asarray(values, dtype=np.float64)
 
     # Defensive guard, independent of whatever the caller already did: a
-    # single non-finite ra/dec/value reaching hp.smoothing() below poisons
-    # its spherical-harmonic transform for the *entire* sky (every output
-    # pixel depends on every input pixel via that transform), not just the
-    # pixel it landed in -- silently turning the whole map to NaN. Drop
-    # such rows here so this function is safe on its own, whatever the
-    # caller's input hygiene looks like.
+    # single non-finite ra/dec/value would fold a NaN into the weighted sum
+    # of every display cell within mask_radius_deg of it, NaN-ing out that
+    # whole neighborhood. Drop such rows here so this function is safe on
+    # its own, whatever the caller's input hygiene looks like.
     bad = ~(np.isfinite(ra) & np.isfinite(dec) & np.isfinite(values))
     if np.any(bad):
         print(
@@ -314,38 +306,24 @@ def grid_and_smooth(ra, dec, values, smooth_deg, nside=128, display_resolution=0
         )
         ra, dec, values = ra[~bad], dec[~bad], values[~bad]
 
-    # HEALPix uses colatitude (0 at the north pole, pi at the south pole)
-    # and longitude in [0, 2*pi), both in radians.
+    if mask_radius_deg is None:
+        mask_radius_deg = 2.0 * smooth_deg
+
+    sigma_deg = smooth_deg / np.sqrt(8.0 * np.log(2.0))  # FWHM -> sigma
+
+    # Colatitude (0 at the north pole, pi at the south pole) and longitude
+    # in [0, 2*pi), both in radians -- then straight to 3D unit vectors, so
+    # every distance below is an exact great-circle (chord) distance, with
+    # no seam and no polar distortion.
     theta = np.deg2rad(90.0 - dec)
     phi = np.deg2rad(ra % 360.0)
+    data_xyz = np.column_stack([
+        np.sin(theta) * np.cos(phi),
+        np.sin(theta) * np.sin(phi),
+        np.cos(theta),
+    ])
 
-    npix = hp.nside2npix(nside)
-    pix = np.atleast_1d(hp.ang2pix(nside, theta, phi))
-
-    accum = np.zeros(npix, dtype=np.float64)
-    count = np.zeros(npix, dtype=np.float64)
-    np.add.at(accum, pix, values)
-    np.add.at(count, pix, 1.0)
-
-    fwhm_rad = np.deg2rad(smooth_deg)
-    s_accum = hp.smoothing(accum, fwhm=fwhm_rad)
-    s_count = hp.smoothing(count, fwhm=fwhm_rad)
-
-    # NOTE: do NOT build a "divide, then NaN out uncovered pixels" HEALPix
-    # map here and interpolate *that*. hp.get_interp_val() does bilinear
-    # interpolation across each query point's 4 neighboring pixels, and a
-    # weighted sum involving even one NaN neighbor is itself NaN -- so a
-    # HEALPix-space map that's NaN at every uncovered pixel poisons the
-    # interpolated result at any display point whose neighbor stencil
-    # touches even one of them. On a real, only-partially-covered sky (most
-    # HEALPix pixels never hit by an actual pointing), that stencil touches
-    # an uncovered pixel almost everywhere -- including display cells that
-    # sit right on top of real data -- wiping out nearly the entire map.
-    # Interpolating the raw (never-NaN) smoothed accum/count maps
-    # separately, and only masking by coverage *after* landing on the
-    # regular display grid, avoids this entirely.
-
-    # Resample onto a regular lon/dec grid, purely for compatibility with
+    # Build the regular lon/dec display grid, purely for compatibility with
     # the existing matplotlib mollweide + pcolormesh display code. Gridding
     # is done in longitude degrees (lon = -(ra % 360), wrapped to
     # (-180, 180]), not in raw RA degrees -- otherwise pcolormesh throws a
@@ -362,42 +340,47 @@ def grid_and_smooth(ra, dec, values, smooth_deg, nside=128, display_resolution=0
     ra_mesh = np.mod(-lon_mesh, 360.0)
     theta_mesh = np.deg2rad(90.0 - dec_mesh)
     phi_mesh = np.deg2rad(ra_mesh)
-
-    accum_mesh = hp.get_interp_val(s_accum, theta_mesh, phi_mesh)
-    count_mesh = hp.get_interp_val(s_count, theta_mesh, phi_mesh)
-
-    # Coverage mask: real-space great-circle distance to the nearest actual
-    # input pointing, NOT the harmonic-smoothed count_mesh. hp.smoothing()'s
-    # spherical-harmonic beam can ring on a sparse, sharp-edged coverage
-    # pattern (real gaps between drift-scan pointings), occasionally
-    # swinging count_mesh back above the threshold in small isolated spots
-    # well inside a genuine gap -- painting spurious, disconnected "filled
-    # in" dots with plausible-looking values where there's no data at all.
-    # A KDTree distance query on the original points can't ring, so it's
-    # what decides *whether* a cell is shown; count_mesh/accum_mesh still
-    # decide its smoothed *value*.
-    if mask_radius_deg is None:
-        mask_radius_deg = 2.0 * smooth_deg
-
-    data_xyz = np.column_stack([
-        np.sin(theta) * np.cos(phi),
-        np.sin(theta) * np.sin(phi),
-        np.cos(theta),
-    ])
     mesh_xyz = np.column_stack([
         np.sin(theta_mesh.ravel()) * np.cos(phi_mesh.ravel()),
         np.sin(theta_mesh.ravel()) * np.sin(phi_mesh.ravel()),
         np.cos(theta_mesh.ravel()),
     ])
-    chord_dist, _ = cKDTree(data_xyz).query(mesh_xyz, k=1)
-    # chord length between two unit vectors separated by angle a is
-    # 2*sin(a/2); compare directly in chord space to avoid an arcsin per
-    # query point.
+
+    # "Splat" each actual pointing's Gaussian-weighted contribution onto
+    # the (usually few) nearby display cells within mask_radius_deg, rather
+    # than the other way around (checking every display cell against every
+    # pointing) -- there are normally far fewer real pointings than display
+    # cells, so this is the cheaper direction to loop over.
+    n_cells = mesh_xyz.shape[0]
+    weighted_sum = np.zeros(n_cells, dtype=np.float64)
+    weight_total = np.zeros(n_cells, dtype=np.float64)
+
     max_chord = 2.0 * np.sin(np.deg2rad(mask_radius_deg) / 2.0)
-    near_data = (chord_dist <= max_chord).reshape(theta_mesh.shape)
+    sigma_rad = np.deg2rad(sigma_deg)
+
+    grid_tree = cKDTree(mesh_xyz)
+    # One batched query for every pointing's nearby-cell list, rather than
+    # N separate Python-level calls.
+    neighbor_lists = grid_tree.query_ball_point(data_xyz, r=max_chord)
+
+    for i, cell_idx in enumerate(neighbor_lists):
+        if not cell_idx:
+            continue
+        cell_idx = np.asarray(cell_idx)
+        chord = np.linalg.norm(mesh_xyz[cell_idx] - data_xyz[i], axis=1)
+        # chord length between two unit vectors separated by true angle a
+        # is 2*sin(a/2); invert that to recover the real angle for the
+        # Gaussian weight (chord distance alone would distort the kernel
+        # width away from the poles/across long distances).
+        angle_rad = 2.0 * np.arcsin(np.clip(chord / 2.0, 0.0, 1.0))
+        w = np.exp(-0.5 * (angle_rad / sigma_rad) ** 2)
+        np.add.at(weighted_sum, cell_idx, w * values[i])
+        np.add.at(weight_total, cell_idx, w)
 
     with np.errstate(invalid="ignore", divide="ignore"):
-        smoothed = np.where(near_data & (count_mesh > 1e-6), accum_mesh / count_mesh, np.nan)
+        smoothed_flat = np.where(weight_total > 1e-12, weighted_sum / weight_total, np.nan)
+
+    smoothed = smoothed_flat.reshape(theta_mesh.shape)
 
     return lon_grid, dec_grid, smoothed
 
@@ -444,15 +427,23 @@ def ra_deg_to_hours(ra_deg):
 # plotting stuff
 # -------
 
-def _setup_axes():
+def _setup_axes(dpi=150):
     '''
     This function sets up the figure and the Mollweide axes!
 
     Inputs:
     -------
-        unmapped_color (str): color of unmapped regions of the sky
+        dpi (float): figure resolution, deliberately used for the
+            *interactive* plt.show() window too, not just plt.savefig().
+            A pcolormesh grid this fine can render differently at
+            different resolutions: a small, faint, real coverage island
+            can get anti-aliased into invisibility in a lower-resolution
+            interactive window while still resolving clearly in a
+            higher-dpi saved file (or vice versa) -- same data, same
+            code path, different pixel grid to rasterize onto. Passing the
+            same dpi to both makes plt.show() and plt.savefig() agree.
     '''
-    fig = plt.figure(figsize=(14, 7))
+    fig = plt.figure(figsize=(14, 7), dpi=dpi)
     ax = fig.add_subplot(111, projection="mollweide")
     ax.set_facecolor('white')
     ax.grid(True, linestyle=":", alpha=0.6, color="black")
@@ -475,8 +466,8 @@ def _setup_axes():
     return fig, ax
 
 
-def plot_skymap(ra, dec, mean_rn, smooth_deg, nside=128, display_res=0.25,
-                 mask_radius_deg=None, output_path=None):
+def plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=0.25,
+                 mask_radius_deg=None, dpi=150, output_path=None):
     '''
     This function creates and then plots the rednoise skymap.
 
@@ -485,24 +476,36 @@ def plot_skymap(ra, dec, mean_rn, smooth_deg, nside=128, display_res=0.25,
         ra (arr)
         dec (arr)
         mean_rn (arr)
-        smooth_deg (float): Gaussian beam FWHM in degrees
-        nside (int): HEALPix resolution parameter (power of 2)
+        smooth_deg (float): Gaussian kernel FWHM in degrees
         display_res (float): regular lon/dec display-grid spacing in degrees
         mask_radius_deg (float or None): see grid_and_smooth(); defaults to
             2 * smooth_deg if None
+        dpi (float): figure resolution, used for *both* plt.show() and
+            plt.savefig() -- see _setup_axes()'s docstring for why an
+            interactive window and a saved file need to share one dpi
+            value here, unlike a typical matplotlib script.
         output_path (str): optional path to save image if desired
     '''
     print("Gridding and smoothing ...", flush=True)
     lon_grid, dec_grid, smoothed = grid_and_smooth(ra, dec, mean_rn, smooth_deg,
-                                                    nside=nside,
                                                     display_resolution=display_res,
                                                     mask_radius_deg=mask_radius_deg)
 
-    fig, ax = _setup_axes()
+    fig, ax = _setup_axes(dpi=dpi)
 
     finite = smoothed[np.isfinite(smoothed)]
     finite_pos = finite[finite > 0]
 
+    # NOTE: a genuinely covered display cell whose smoothed value happens to
+    # sit near/below this 2nd-percentile vmin (e.g. right at the tapering
+    # edge of a sparse coverage island) is NOT masked out -- it's clipped to
+    # the bottom of the colormap by LogNorm, which for "inferno" is
+    # near-black. That's expected/correct (distinguishing real-but-faint
+    # coverage, near-black, from genuinely no-data, white via
+    # cmap.set_bad() below) -- but it's easy to mistake for a rendering bug
+    # if it only becomes visible in a saved file and not on an interactive
+    # plot rendered at a different (often lower) screen resolution; see the
+    # `dpi` parameter above and _setup_axes()'s docstring.
     #if len(finite_pos) == 0:
     #    norm = Normalize(vmin=np.percentile(finite, 2),
     #                      vmax=np.percentile(finite, 98))
@@ -531,7 +534,7 @@ def plot_skymap(ra, dec, mean_rn, smooth_deg, nside=128, display_res=0.25,
     plt.tight_layout()
 
     if output_path:
-        plt.savefig(output_path, dpi=150, bbox_inches="tight")
+        plt.savefig(output_path, dpi=dpi, bbox_inches="tight")
         print(f'Skymap saved to {output_path}', flush=True)
     else:
         plt.show()
@@ -539,11 +542,19 @@ def plot_skymap(ra, dec, mean_rn, smooth_deg, nside=128, display_res=0.25,
     plt.close(fig)
 
 
-def plot_coverage(ra, dec, output_path=None):
+def plot_coverage(ra, dec, dpi=150, output_path=None):
     '''
     This function plots a dot on our Mollweide axes for each pointing with data.
+
+    Inputs:
+    -------
+        ra (arr)
+        dec (arr)
+        dpi (float): figure resolution, used for *both* plt.show() and
+            plt.savefig() -- see plot_skymap()'s docstring.
+        output_path (str): optional path to save image if desired
     '''
-    fig, ax = _setup_axes()
+    fig, ax = _setup_axes(dpi=dpi)
 
     ra_moll = ra_deg_to_moll_rad(ra)
     dec_moll = dec_deg_to_moll_rad(dec)
@@ -555,7 +566,7 @@ def plot_coverage(ra, dec, output_path=None):
     plt.tight_layout()
 
     if output_path:
-        plt.savefig(output_path, dpi=150, bbox_inches="tight")
+        plt.savefig(output_path, dpi=dpi, bbox_inches="tight")
         print(f'Coverage map saved to {output_path}', flush=True)
     else:
         plt.show()
@@ -567,26 +578,32 @@ def plot_coverage(ra, dec, output_path=None):
 @click.argument("npz_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.argument("h5_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--smooth-deg", type=float, default=1.0, show_default=True,
-              help="Gaussian smoothing beam FWHM, in degrees.")
-@click.option("--nside", type=int, default=128, show_default=True,
-              help="HEALPix resolution parameter (must be a power of 2); "
-                   "pixel size is roughly 58.6/nside degrees.")
+              help="Gaussian kernel FWHM, in degrees, for the real-space "
+                   "distance-weighted average at each display cell.")
 @click.option("--display-res", "display_res", type=float, default=0.25, show_default=True,
-              help="Regular lon/dec grid spacing, in degrees, that the smoothed "
-                   "HEALPix map is resampled onto for the Mollweide plot.")
+              help="Regular lon/dec grid spacing, in degrees, that the kernel "
+                   "regression is evaluated on for the Mollweide plot.")
 @click.option("--mask-radius-deg", "mask_radius_deg", type=float, default=None,
               help="Display cells farther than this many degrees (great-circle) "
-                   "from the nearest actual pointing are always left blank, "
-                   "regardless of smoothed coverage. Defaults to 2 * --smooth-deg. "
-                   "Guards against hp.smoothing() ringing on sparse coverage "
-                   "'filling in' spurious disconnected dots in real gaps -- "
-                   "lower it if real gaps still show spurious fill, raise it if "
-                   "genuinely-covered edges are being clipped.")
+                   "from the nearest actual pointing are always left blank. "
+                   "Defaults to 2 * --smooth-deg (about where a Gaussian's "
+                   "weight is already down to ~1.5e-5 of its peak) -- lower "
+                   "it to blank out more of a coverage island's tapering "
+                   "edge, raise it to extend the displayed edge further.")
+@click.option("--dpi", type=float, default=150, show_default=True,
+              help="Figure resolution, used for BOTH the interactive plt.show() "
+                   "window and a saved file, so the two always look the same. "
+                   "A mismatch (e.g. a lower-resolution interactive window than "
+                   "a saved file's dpi) can make small, faint, real coverage "
+                   "get anti-aliased away on screen while still showing up "
+                   "clearly (near-black, at the bottom of the log color scale) "
+                   "in a saved file at higher dpi -- same data, just resolved "
+                   "differently.")
 @click.option("--output-skymap", type=click.Path(dir_okay=False, path_type=Path), default=None,
               help="Save sky map to this file (default: display).")
 @click.option("--output-coverage", type=click.Path(dir_okay=False, path_type=Path), default=None,
               help="Save coverage map to this file (default: display).")
-def main(npz_file, h5_file, smooth_deg, nside, display_res, mask_radius_deg,
+def main(npz_file, h5_file, smooth_deg, display_res, mask_radius_deg, dpi,
          output_skymap, output_coverage):
     """
     Plot the CHAMPSS rednoise skymap and coverage map from NPZ_FILE (the
@@ -597,11 +614,11 @@ def main(npz_file, h5_file, smooth_deg, nside, display_res, mask_radius_deg,
     ra, dec, mean_rn = load_data(npz_file, h5_file)
 
     print("Plotting sky map...", flush=True)
-    plot_skymap(ra, dec, mean_rn, smooth_deg, nside=nside, display_res=display_res,
-                mask_radius_deg=mask_radius_deg, output_path=output_skymap)
+    plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=display_res,
+                mask_radius_deg=mask_radius_deg, dpi=dpi, output_path=output_skymap)
 
     print("Plotting coverage map...", flush=True)
-    plot_coverage(ra, dec, output_path=output_coverage)
+    plot_coverage(ra, dec, dpi=dpi, output_path=output_coverage)
 
 
 if __name__ == "__main__":
