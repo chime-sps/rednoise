@@ -10,20 +10,20 @@ and produces the following plots:
 NOTE FOR ROBERT AND LARS:
 
     Current exp derivation...
-    N_in_power_spectrum = np.sum(scales)
-    T_exp = 2 * N_in_power_spectrum * TSAMP
+    T_exp = length * TSAMP
+    (length comes from the beamformer pointings map now, not the padded scales array)
 
 Usage:
 
-    python3 rednoise_skymap.py rednoise_dm_info.npz combined_medians.h5
-    python3 rednoise_skymap.py rednoise_dm_info.npz combined_medians.h5 --smooth-deg 1.0
+    python3 rednoise_skymap.py rednoise_dm_info.npz pointings_map_v2-0.json
+    python3 rednoise_skymap.py rednoise_dm_info.npz pointings_map_v2-0.json --smooth-deg 1.0
         --output-skymap skymap.png --output-coverage coverage.png
 '''
 
+import json
 from pathlib import Path
 
 import click
-import h5py
 import numpy as np
 from scipy.spatial import cKDTree
 
@@ -41,50 +41,37 @@ from sps_common.constants import TSAMP
 # load our data!
 # -------------
 
-def load_exposure_lookup(h5_path: Path):
+def load_pointing_exposure_lookup(pointings_map_path: Path):
     """
-    From h5_path, incorrectly calculate Texp XD
+    From pointings_map_path, correctly calculate Texp.
     returns as dict
 
     Inputs:
     -------
-        h5_path (Path): path to the combined medians HDF5 file
+        pointings_map_path (Path): path to a pointings_map_*.json file
+            (chime-sps/champss_software beamformer, "length" field)
 
     Returns:
     --------
-        lookup (dict): maps (year, month, day, RA rounded to 4 dp,
-                        Dec rounded to 4 dp) -> T_exp (float, seconds)
+        lookup (dict): maps (RA rounded to 4 dp, Dec rounded to 4 dp)
+                        -> T_exp (float, seconds)
     """
-    print(f"Loading exposure info from {h5_path} ...", flush=True)
+    print(f"Loading exposure info from {pointings_map_path} ...", flush=True)
 
-    with h5py.File(h5_path, "r") as h5:
-        scale_key = "scales" if "scales" in h5 else "scale"
-        scale = np.asarray(h5[scale_key])
-        n_freq = np.asarray(h5["n_freq"])   
-        ra = np.asarray(h5["ra"])
-        dec = np.asarray(h5["dec"])
-        year = np.asarray(h5["year"]).astype(int)
-        month = np.asarray(h5["month"]).astype(int)
-        day = np.asarray(h5["day"]).astype(int)
+    with open(pointings_map_path, "r") as f:
+        pointings = json.load(f)
 
-    n_rows = len(ra)
-    t_exp = np.zeros(n_rows, dtype=np.float64)
+    lookup = {
+        (round(p["ra"], 4), round(p["dec"], 4)): p["length"] * TSAMP
+        for p in pointings
+    }
 
-    for i in range(n_rows):
-        valid_scale = scale[i, :n_freq[i]]
-        valid_scale = valid_scale[valid_scale >= 0]  #don't use padded array contents
-        n_in_power_spectrum = np.sum(valid_scale)
-        t_exp[i] = 2.0 * n_in_power_spectrum * TSAMP
-
-    keys = zip(year, month, day, np.round(ra, 4), np.round(dec, 4))
-    lookup = dict(zip(keys, t_exp))
-
-    print(f"Built Texp dictionary for {len(lookup)} pointings + days.", flush=True)
+    print(f"Built Texp dictionary for {len(lookup)} pointings.", flush=True)
 
     return lookup
 
 
-def load_data(npz_path: Path, h5_path: Path):
+def load_data(npz_path: Path, pointings_map_path: Path):
     """
     This function loads the DM info file and returns the relevant contents.
 
@@ -94,7 +81,7 @@ def load_data(npz_path: Path, h5_path: Path):
     Inputs:
     -------
         npz_path (Path): path to the DM info file
-        h5_path (Path): path to the combined medians HDF5 file
+        pointings_map_path (Path): path to a pointings_map_*.json file
 
     Returns:
     --------
@@ -131,14 +118,15 @@ def load_data(npz_path: Path, h5_path: Path):
         year, month, day = year[keep], month[keep], day[keep]
         rn_sum = rn_sum[keep]
 
-    exposure_lookup = load_exposure_lookup(h5_path)
+    exposure_lookup = load_pointing_exposure_lookup(pointings_map_path)
 
-    row_keys = list(zip(year, month, day, np.round(ra, 4), np.round(dec, 4)))
+    row_keys = list(zip(np.round(ra, 4), np.round(dec, 4)))
     t_exp = np.array([exposure_lookup.get(k, np.nan) for k in row_keys], dtype=np.float64)
 
     n_missing = np.sum(np.isnan(t_exp))
     if n_missing:
-        print(f"There are {n_missing)}pointings in the Texp dict.", flus=True)
+        print(f"{n_missing} pointings not in the Texp dict.", flush=True)
+        t_exp = np.where(np.isnan(t_exp), 1.0, t_exp)
 
     pointing_keys = np.round(ra, 4) * 1000 + np.round(dec, 4)
     unique_keys, inv = np.unique(pointing_keys, return_inverse=True)
@@ -427,7 +415,7 @@ def plot_coverage(ra, dec, dpi=150, output_path=None):
 
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
 @click.argument("npz_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
-@click.argument("h5_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("pointings_map_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--smooth-deg", type=float, default=1.0, show_default=True,
               help="Gaussian kernel FWHM, in degrees, for the real-space "
                    "distance-weighted average at each display cell.")
@@ -442,15 +430,15 @@ def plot_coverage(ra, dec, dpi=150, output_path=None):
               help="Save sky map to this file (default: display).")
 @click.option("--output-coverage", type=click.Path(dir_okay=False, path_type=Path), default=None,
               help="Save coverage map to this file (default: display).")
-def main(npz_file, h5_file, smooth_deg, display_res, mask_radius_deg, dpi,
+def main(npz_file, pointings_map_file, smooth_deg, display_res, mask_radius_deg, dpi,
          output_skymap, output_coverage):
     """
     Plot the CHAMPSS rednoise skymap and coverage map from NPZ_FILE (the
-    rednoise_dm_info.npz produced by rednoise_dm_behavior.py) and H5_FILE
-    (the combined_medians.h5 produced by combine_rednoise_medians.py, used
-    to derive each pointing-day's exposure length via its 'scales' array).
+    rednoise_dm_info.npz produced by rednoise_dm_behavior.py) and
+    POINTINGS_MAP_FILE (a pointings_map_*.json file, used to derive each
+    pointing's exposure length via its 'length' field).
     """
-    ra, dec, mean_rn = load_data(npz_file, h5_file)
+    ra, dec, mean_rn = load_data(npz_file, pointings_map_file)
 
     print("Plotting sky map...", flush=True)
     plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=display_res,
