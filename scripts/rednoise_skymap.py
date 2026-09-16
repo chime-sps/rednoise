@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 '''
-This module reads a rednoise DM median file + a full rednoise file
-and produces the following plots:
+This module reads a rednoise DM median file and produces the following plots:
 
     1. Rednoise skymap: exposure time-weighted mean over Ndays, median over DM, and
     sum over f_bin > 5 of rednoise power
@@ -11,12 +10,13 @@ NOTE FOR ROBERT AND LARS:
 
     Current exp derivation...
     T_exp = length * TSAMP
-    (length comes from the beamformer pointings map now, not the padded scales array)
+    (length comes from the beamformer pointings map now, not the padded scales array.
+    pointings before Feb 27 2026 use pointings_map_v1-3.json, on/after use pointings_map_v2-0.json)
 
 Usage:
 
-    python3 rednoise_skymap.py rednoise_dm_info.npz pointings_map_v2-0.json
-    python3 rednoise_skymap.py rednoise_dm_info.npz pointings_map_v2-0.json --smooth-deg 1.0
+    python3 rednoise_skymap.py rednoise_dm_info.npz
+    python3 rednoise_skymap.py rednoise_dm_info.npz --smooth-deg 1.0
         --output-skymap skymap.png --output-coverage coverage.png
 '''
 
@@ -35,6 +35,11 @@ mpl.rcParams['font.family'] = 'monospace'
 from matplotlib.colors import Normalize, LogNorm
 
 from sps_common.constants import TSAMP
+
+POINTINGS_MAP_CUTOVER = 20260227  # v1-3 before this date, v2-0 on/after
+POINTINGS_MAP_DIR = Path(__file__).resolve().parent / "data"
+POINTINGS_MAP_V1_3_PATH = POINTINGS_MAP_DIR / "pointings_map_v1-3.json"
+POINTINGS_MAP_V2_0_PATH = POINTINGS_MAP_DIR / "pointings_map_v2-0.json"
 
 
 # -------------
@@ -71,7 +76,7 @@ def load_pointing_exposure_lookup(pointings_map_path: Path):
     return lookup
 
 
-def load_data(npz_path: Path, pointings_map_path: Path):
+def load_data(npz_path: Path, pointings_map_v1_3_path: Path, pointings_map_v2_0_path: Path):
     """
     This function loads the DM info file and returns the relevant contents.
 
@@ -81,7 +86,10 @@ def load_data(npz_path: Path, pointings_map_path: Path):
     Inputs:
     -------
         npz_path (Path): path to the DM info file
-        pointings_map_path (Path): path to a pointings_map_*.json file
+        pointings_map_v1_3_path (Path): path to pointings_map_v1-3.json,
+            used for pointings from before POINTINGS_MAP_CUTOVER
+        pointings_map_v2_0_path (Path): path to pointings_map_v2-0.json,
+            used for pointings on/after POINTINGS_MAP_CUTOVER
 
     Returns:
     --------
@@ -118,10 +126,16 @@ def load_data(npz_path: Path, pointings_map_path: Path):
         year, month, day = year[keep], month[keep], day[keep]
         rn_sum = rn_sum[keep]
 
-    exposure_lookup = load_pointing_exposure_lookup(pointings_map_path)
+    exposure_lookup_v1_3 = load_pointing_exposure_lookup(pointings_map_v1_3_path)
+    exposure_lookup_v2_0 = load_pointing_exposure_lookup(pointings_map_v2_0_path)
 
     row_keys = list(zip(np.round(ra, 4), np.round(dec, 4)))
-    t_exp = np.array([exposure_lookup.get(k, np.nan) for k in row_keys], dtype=np.float64)
+    row_date = year * 10000 + month * 100 + day
+
+    # if/else on the pointing's date: v1-3 before the cutover, v2-0 on/after
+    t_exp_v1_3 = np.array([exposure_lookup_v1_3.get(k, np.nan) for k in row_keys], dtype=np.float64)
+    t_exp_v2_0 = np.array([exposure_lookup_v2_0.get(k, np.nan) for k in row_keys], dtype=np.float64)
+    t_exp = np.where(row_date < POINTINGS_MAP_CUTOVER, t_exp_v1_3, t_exp_v2_0)
 
     n_missing = np.sum(np.isnan(t_exp))
     if n_missing:
@@ -415,7 +429,6 @@ def plot_coverage(ra, dec, dpi=150, output_path=None):
 
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
 @click.argument("npz_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
-@click.argument("pointings_map_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--smooth-deg", type=float, default=1.0, show_default=True,
               help="Gaussian kernel FWHM, in degrees, for the real-space "
                    "distance-weighted average at each display cell.")
@@ -430,15 +443,19 @@ def plot_coverage(ra, dec, dpi=150, output_path=None):
               help="Save sky map to this file (default: display).")
 @click.option("--output-coverage", type=click.Path(dir_okay=False, path_type=Path), default=None,
               help="Save coverage map to this file (default: display).")
-def main(npz_file, pointings_map_file, smooth_deg, display_res, mask_radius_deg, dpi,
+def main(npz_file, smooth_deg, display_res, mask_radius_deg, dpi,
          output_skymap, output_coverage):
     """
     Plot the CHAMPSS rednoise skymap and coverage map from NPZ_FILE (the
-    rednoise_dm_info.npz produced by rednoise_dm_behavior.py) and
-    POINTINGS_MAP_FILE (a pointings_map_*.json file, used to derive each
-    pointing's exposure length via its 'length' field).
+    rednoise_dm_info.npz produced by rednoise_dm_behavior.py). Pointing
+    exposure lengths come from pointings_map_v1-3.json / pointings_map_v2-0.json
+    in scripts/data/ (v1-3 for pointings before Feb 27 2026, v2-0 on/after).
     """
-    ra, dec, mean_rn = load_data(npz_file, pointings_map_file)
+    for p in (POINTINGS_MAP_V1_3_PATH, POINTINGS_MAP_V2_0_PATH):
+        if not p.exists():
+            raise FileNotFoundError(f"Expected pointings map at {p}")
+
+    ra, dec, mean_rn = load_data(npz_file, POINTINGS_MAP_V1_3_PATH, POINTINGS_MAP_V2_0_PATH)
 
     print("Plotting sky map...", flush=True)
     plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=display_res,
