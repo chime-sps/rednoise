@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 '''
-This module reads a rednoise DM median file and produces the following plots:
+This module reads a rednoise DM median file + a full rednoise file
+and produces the following plots:
 
     1. Rednoise skymap: exposure time-weighted mean over Ndays, median over DM, and
     sum over f_bin > 5 of rednoise power
@@ -76,7 +77,37 @@ def load_pointing_exposure_lookup(pointings_map_path: Path):
     return lookup
 
 
-def load_data(npz_path: Path, pointings_map_v1_3_path: Path, pointings_map_v2_0_path: Path):
+def load_pointing_nchan_lookup(pointings_map_path: Path):
+    """
+    From pointings_map_path, get nchans per pointing for --nchan-weight.
+    returns as dict
+
+    Inputs:
+    -------
+        pointings_map_path (Path): path to a pointings_map_*.json file
+
+    Returns:
+    --------
+        lookup (dict): maps (RA rounded to 4 dp, Dec rounded to 4 dp)
+                        -> nchans (int)
+    """
+    print(f"Loading nchan info from {pointings_map_path} ...", flush=True)
+
+    with open(pointings_map_path, "r") as f:
+        pointings = json.load(f)
+
+    lookup = {
+        (round(p["ra"], 4), round(p["dec"], 4)): p["nchans"]
+        for p in pointings
+    }
+
+    print(f"Built nchan dictionary for {len(lookup)} pointings.", flush=True)
+
+    return lookup
+
+
+def load_data(npz_path: Path, pointings_map_v1_3_path: Path, pointings_map_v2_0_path: Path,
+              nchan_weight: bool = False):
     """
     This function loads the DM info file and returns the relevant contents.
 
@@ -90,6 +121,8 @@ def load_data(npz_path: Path, pointings_map_v1_3_path: Path, pointings_map_v2_0_
             used for pointings from before POINTINGS_MAP_CUTOVER
         pointings_map_v2_0_path (Path): path to pointings_map_v2-0.json,
             used for pointings on/after POINTINGS_MAP_CUTOVER
+        nchan_weight (bool): if True, also weight rn_sum by 1/nchan per
+            pointing (nchan looked up the same v1-3/v2-0 way as T_exp)
 
     Returns:
     --------
@@ -141,6 +174,22 @@ def load_data(npz_path: Path, pointings_map_v1_3_path: Path, pointings_map_v2_0_
     if n_missing:
         print(f"{n_missing} pointings not in the Texp dict.", flush=True)
         t_exp = np.where(np.isnan(t_exp), 1.0, t_exp)
+
+    if nchan_weight:
+        nchan_lookup_v1_3 = load_pointing_nchan_lookup(pointings_map_v1_3_path)
+        nchan_lookup_v2_0 = load_pointing_nchan_lookup(pointings_map_v2_0_path)
+
+        # same before/after Feb 27 delineation as T_exp
+        nchan_v1_3 = np.array([nchan_lookup_v1_3.get(k, np.nan) for k in row_keys], dtype=np.float64)
+        nchan_v2_0 = np.array([nchan_lookup_v2_0.get(k, np.nan) for k in row_keys], dtype=np.float64)
+        nchan = np.where(row_date < POINTINGS_MAP_CUTOVER, nchan_v1_3, nchan_v2_0)
+
+        n_missing_nchan = np.sum(np.isnan(nchan))
+        if n_missing_nchan:
+            print(f"{n_missing_nchan} pointings not in the nchan dict.", flush=True)
+            nchan = np.where(np.isnan(nchan), 1.0, nchan)
+
+        rn_sum = rn_sum / nchan
 
     pointing_keys = np.round(ra, 4) * 1000 + np.round(dec, 4)
     unique_keys, inv = np.unique(pointing_keys, return_inverse=True)
@@ -319,7 +368,7 @@ def _setup_axes(dpi=150):
     '''
     This function sets up the figure and the Mollweide axes!
     '''
-    fig = plt.figure(figsize=(14, 7), dpi=dpi)
+    fig = plt.figure(figsize=(10, 5), dpi=dpi)
     ax = fig.add_subplot(111, projection="mollweide")
     ax.set_facecolor('white')
     ax.grid(True, linestyle=":", alpha=0.6, color="black")
@@ -342,7 +391,7 @@ def _setup_axes(dpi=150):
 
 
 def plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=0.25,
-                 mask_radius_deg=None, dpi=150, output_path=None):
+                 mask_radius_deg=None, dpi=150, nchan_weight=False, output_path=None):
     '''
     This function creates and then plots the rednoise skymap.
 
@@ -353,6 +402,7 @@ def plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=0.25,
         mean_rn (arr)
         smooth_deg (float): Gaussian kernel FWHM in degrees
         display_res (float): regular lon/dec display-grid spacing in degrees
+        nchan_weight (bool): if True, note the 1/nchan weighting on the colorbar label
         output_path (str): optional path to save image if desired
     '''
     print("Gridding and smoothing ...", flush=True)
@@ -380,10 +430,11 @@ def plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=0.25,
                          shading="nearest", rasterized=True)
 
     cbar = fig.colorbar(pcm, ax=ax, pad=0.02, shrink=0.8, orientation="vertical")
-    cbar.set_label(
-        r'$\left\langle\ \mathrm{median}_{\mathrm{DM}}\left(\Sigma_{f>5}\ P_f\right)\ \right\rangle_{T_{\mathrm{exp}}}$',
-        fontsize=13,
-    )
+    if nchan_weight:
+        cbar_label = r'$\left\langle\ \mathrm{median}_{\mathrm{DM}}\left(\Sigma_{f>5}\ P_f\right)\ \right\rangle_{T_{\mathrm{exp}}} / N_{\mathrm{chan}}$'
+    else:
+        cbar_label = r'$\left\langle\ \mathrm{median}_{\mathrm{DM}}\left(\Sigma_{f>5}\ P_f\right)\ \right\rangle_{T_{\mathrm{exp}}}$'
+    cbar.set_label(cbar_label, fontsize=13)
     ax.set_title('Skymap of Rednoise Across CHAMPSS Observing Period', fontsize=20, fontweight='bold')
 
     plt.tight_layout()
@@ -439,11 +490,13 @@ def plot_coverage(ra, dec, dpi=150, output_path=None):
               help="Display cells farther than this many degrees (great-circle) ")
 @click.option("--dpi", type=float, default=150, show_default=True,
               help="Figure resolution.")
+@click.option("--nchan-weight", "nchan_weight", is_flag=True, default=False,
+              help="Weight rednoise values by 1/nchan before plotting.")
 @click.option("--output-skymap", type=click.Path(dir_okay=False, path_type=Path), default=None,
               help="Save sky map to this file (default: display).")
 @click.option("--output-coverage", type=click.Path(dir_okay=False, path_type=Path), default=None,
               help="Save coverage map to this file (default: display).")
-def main(npz_file, smooth_deg, display_res, mask_radius_deg, dpi,
+def main(npz_file, smooth_deg, display_res, mask_radius_deg, dpi, nchan_weight,
          output_skymap, output_coverage):
     """
     Plot the CHAMPSS rednoise skymap and coverage map from NPZ_FILE (the
@@ -455,11 +508,13 @@ def main(npz_file, smooth_deg, display_res, mask_radius_deg, dpi,
         if not p.exists():
             raise FileNotFoundError(f"Expected pointings map at {p}")
 
-    ra, dec, mean_rn = load_data(npz_file, POINTINGS_MAP_V1_3_PATH, POINTINGS_MAP_V2_0_PATH)
+    ra, dec, mean_rn = load_data(npz_file, POINTINGS_MAP_V1_3_PATH, POINTINGS_MAP_V2_0_PATH,
+                                  nchan_weight=nchan_weight)
 
     print("Plotting sky map...", flush=True)
     plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=display_res,
-                mask_radius_deg=mask_radius_deg, dpi=dpi, output_path=output_skymap)
+                mask_radius_deg=mask_radius_deg, dpi=dpi, nchan_weight=nchan_weight,
+                output_path=output_skymap)
 
     print("Plotting coverage map...", flush=True)
     plot_coverage(ra, dec, dpi=dpi, output_path=output_coverage)
