@@ -42,68 +42,87 @@ POINTINGS_MAP_DIR = Path(__file__).resolve().parent / "data"
 POINTINGS_MAP_V1_3_PATH = POINTINGS_MAP_DIR / "pointings_map_v1-3.json"
 POINTINGS_MAP_V2_0_PATH = POINTINGS_MAP_DIR / "pointings_map_v2-0.json"
 
+# exact (ra,dec) dict matching against the pointings map missed ~everything
+# (the map's own grid isn't even self-consistent to 4 decimal places between
+# v1-3 and v2-0), so we match nearest-neighbor instead, in 3D unit-vector
+# space (no RA wraparound / pole weirdness). 0.1 deg is comfortably above
+# the worst v1-3/v2-0 grid drift we've seen (~0.06 deg) and comfortably
+# below the spacing between genuinely different beams (~0.25 deg).
+MAX_MATCH_SEP_DEG = 0.1
+
+
+def _radec_to_xyz(ra, dec):
+    theta = np.deg2rad(90.0 - dec)
+    phi = np.deg2rad(np.mod(ra, 360.0))
+    return np.column_stack([
+        np.sin(theta) * np.cos(phi),
+        np.sin(theta) * np.sin(phi),
+        np.cos(theta),
+    ])
+
 
 # -------------
 # load our data!
 # -------------
 
-def load_pointing_exposure_lookup(pointings_map_path: Path):
+def load_pointing_map_tree(pointings_map_path: Path):
     """
-    From pointings_map_path, correctly calculate Texp.
-    returns as dict
+    From pointings_map_path, build a nearest-neighbor tree over its
+    pointings, for matching against RA/Dec that don't line up with the
+    map's grid to exact decimal places.
 
     Inputs:
     -------
         pointings_map_path (Path): path to a pointings_map_*.json file
-            (chime-sps/champss_software beamformer, "length" field)
+            (chime-sps/champss_software beamformer)
 
     Returns:
     --------
-        lookup (dict): maps (RA rounded to 4 dp, Dec rounded to 4 dp)
-                        -> T_exp (float, seconds)
+        tree (cKDTree): nearest-neighbor tree, in 3D unit-vector space,
+            over the map's (RA, Dec)
+        length (arr): "length" field, same order as tree's points
+        nchans (arr): "nchans" field, same order as tree's points
     """
-    print(f"Loading exposure info from {pointings_map_path} ...", flush=True)
+    print(f"Loading pointing map {pointings_map_path} ...", flush=True)
 
     with open(pointings_map_path, "r") as f:
         pointings = json.load(f)
 
-    lookup = {
-        (round(p["ra"], 4), round(p["dec"], 4)): p["length"] * TSAMP
-        for p in pointings
-    }
+    ra = np.array([p["ra"] for p in pointings])
+    dec = np.array([p["dec"] for p in pointings])
+    length = np.array([p["length"] for p in pointings], dtype=np.float64)
+    nchans = np.array([p["nchans"] for p in pointings], dtype=np.float64)
 
-    print(f"Built Texp dictionary for {len(lookup)} pointings.", flush=True)
+    tree = cKDTree(_radec_to_xyz(ra, dec))
 
-    return lookup
+    print(f"Built nearest-neighbor tree for {len(pointings)} pointings.", flush=True)
+
+    return tree, length, nchans
 
 
-def load_pointing_nchan_lookup(pointings_map_path: Path):
+def nearest_pointing_values(tree, values, query_ra, query_dec, max_sep_deg=MAX_MATCH_SEP_DEG):
     """
-    From pointings_map_path, get nchans per pointing for --nchan-weight.
-    returns as dict
+    Look up `values` at the nearest pointing-map entry to each
+    (query_ra, query_dec), NaN if the nearest one is farther than
+    max_sep_deg away (a real miss, not just decimal-place noise).
 
     Inputs:
     -------
-        pointings_map_path (Path): path to a pointings_map_*.json file
+        tree (cKDTree): from load_pointing_map_tree()
+        values (arr): field to look up, same order as tree's points
+        query_ra (arr), query_dec (arr): RA/Dec to match against the map
+        max_sep_deg (float): reject a match farther than this (great-circle)
 
     Returns:
     --------
-        lookup (dict): maps (RA rounded to 4 dp, Dec rounded to 4 dp)
-                        -> nchans (int)
+        matched (arr): values[nearest], NaN where nearest is farther than
+                        max_sep_deg
     """
-    print(f"Loading nchan info from {pointings_map_path} ...", flush=True)
+    chord, idx = tree.query(_radec_to_xyz(query_ra, query_dec))
+    sep_deg = np.rad2deg(2.0 * np.arcsin(np.clip(chord / 2.0, 0.0, 1.0)))
 
-    with open(pointings_map_path, "r") as f:
-        pointings = json.load(f)
-
-    lookup = {
-        (round(p["ra"], 4), round(p["dec"], 4)): p["nchans"]
-        for p in pointings
-    }
-
-    print(f"Built nchan dictionary for {len(lookup)} pointings.", flush=True)
-
-    return lookup
+    matched = values[idx]
+    return np.where(sep_deg <= max_sep_deg, matched, np.nan)
 
 
 def load_data(npz_path: Path, pointings_map_v1_3_path: Path, pointings_map_v2_0_path: Path,
@@ -159,16 +178,16 @@ def load_data(npz_path: Path, pointings_map_v1_3_path: Path, pointings_map_v2_0_
         year, month, day = year[keep], month[keep], day[keep]
         rn_sum = rn_sum[keep]
 
-    exposure_lookup_v1_3 = load_pointing_exposure_lookup(pointings_map_v1_3_path)
-    exposure_lookup_v2_0 = load_pointing_exposure_lookup(pointings_map_v2_0_path)
+    tree_v1_3, length_v1_3, nchans_v1_3 = load_pointing_map_tree(pointings_map_v1_3_path)
+    tree_v2_0, length_v2_0, nchans_v2_0 = load_pointing_map_tree(pointings_map_v2_0_path)
 
-    row_keys = list(zip(np.round(ra, 4), np.round(dec, 4)))
     row_date = year * 10000 + month * 100 + day
+    before_cutover = row_date < POINTINGS_MAP_CUTOVER
 
     # if/else on the pointing's date: v1-3 before the cutover, v2-0 on/after
-    t_exp_v1_3 = np.array([exposure_lookup_v1_3.get(k, np.nan) for k in row_keys], dtype=np.float64)
-    t_exp_v2_0 = np.array([exposure_lookup_v2_0.get(k, np.nan) for k in row_keys], dtype=np.float64)
-    t_exp = np.where(row_date < POINTINGS_MAP_CUTOVER, t_exp_v1_3, t_exp_v2_0)
+    length_matched_v1_3 = nearest_pointing_values(tree_v1_3, length_v1_3, ra, dec)
+    length_matched_v2_0 = nearest_pointing_values(tree_v2_0, length_v2_0, ra, dec)
+    t_exp = np.where(before_cutover, length_matched_v1_3, length_matched_v2_0) * TSAMP
 
     n_missing = np.sum(np.isnan(t_exp))
     if n_missing:
@@ -176,13 +195,9 @@ def load_data(npz_path: Path, pointings_map_v1_3_path: Path, pointings_map_v2_0_
         t_exp = np.where(np.isnan(t_exp), 1.0, t_exp)
 
     if nchan_weight:
-        nchan_lookup_v1_3 = load_pointing_nchan_lookup(pointings_map_v1_3_path)
-        nchan_lookup_v2_0 = load_pointing_nchan_lookup(pointings_map_v2_0_path)
-
-        # same before/after Feb 27 delineation as T_exp
-        nchan_v1_3 = np.array([nchan_lookup_v1_3.get(k, np.nan) for k in row_keys], dtype=np.float64)
-        nchan_v2_0 = np.array([nchan_lookup_v2_0.get(k, np.nan) for k in row_keys], dtype=np.float64)
-        nchan = np.where(row_date < POINTINGS_MAP_CUTOVER, nchan_v1_3, nchan_v2_0)
+        nchan_matched_v1_3 = nearest_pointing_values(tree_v1_3, nchans_v1_3, ra, dec)
+        nchan_matched_v2_0 = nearest_pointing_values(tree_v2_0, nchans_v2_0, ra, dec)
+        nchan = np.where(before_cutover, nchan_matched_v1_3, nchan_matched_v2_0)
 
         n_missing_nchan = np.sum(np.isnan(nchan))
         if n_missing_nchan:
