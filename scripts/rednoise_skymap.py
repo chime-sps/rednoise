@@ -383,7 +383,7 @@ def _setup_axes(dpi=150):
     '''
     This function sets up the figure and the Mollweide axes!
     '''
-    fig = plt.figure(figsize=(10, 5), dpi=dpi)
+    fig = plt.figure(figsize=(14, 7), dpi=dpi)
     ax = fig.add_subplot(111, projection="mollweide")
     ax.set_facecolor('white')
     ax.grid(True, linestyle=":", alpha=0.6, color="black")
@@ -455,7 +455,7 @@ def plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=0.25,
     plt.tight_layout()
 
     if output_path:
-        plt.savefig(output_path, dpi=dpi, bbox_inches="tight")
+        plt.savefig(output_path, dpi=dpi)
         print(f'Skymap saved to {output_path}', flush=True)
     else:
         plt.show()
@@ -485,7 +485,7 @@ def plot_coverage(ra, dec, dpi=150, output_path=None):
     plt.tight_layout()
 
     if output_path:
-        plt.savefig(output_path, dpi=dpi, bbox_inches="tight")
+        plt.savefig(output_path, dpi=dpi)
         print(f'Coverage map saved to {output_path}', flush=True)
     else:
         plt.show()
