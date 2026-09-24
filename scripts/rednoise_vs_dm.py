@@ -89,8 +89,8 @@ is printed if any data fall outside them.
 
 --colorbar-log colors lines by log(DM) instead of DM, which spreads out the
 low-DM trials. A log scale can't include DM 0, so its default colorbar range
-is DEFAULT_DM_LIM_LOG (0.1-1700, 0.1 being about one DM step); the DM 0 trial
-is drawn in the lowest color.
+is DEFAULT_DM_LIM_LOG (1-1600). Trials below 1 (including DM 0) are drawn in
+the lowest color, and trials above 1600 in the highest.
 '''
 
 import json
@@ -158,9 +158,9 @@ DEFAULT_WORKERS = min(8, os.cpu_count() or 1)   # chunk-decompressing processes
 DEFAULT_XLIM = (1e-3, 1e3)
 DEFAULT_YLIM = (1e8, 1e14)
 DEFAULT_DM_LIM = (0.0, DEFAULT_MAXDM_CAP)
-#   log DM: a log scale can't reach 0, so it starts at ~one FDMT DM step
-#   (0.1012 pc cm^-3); the DM 0 trial is clipped to the lowest color
-DEFAULT_DM_LIM_LOG = (0.1, DEFAULT_MAXDM_CAP)
+#   log DM: 1 to 1600 pc cm^-3 (a log scale can't reach 0); trials below 1,
+#   including DM 0, get the lowest color and trials above 1600 the highest
+DEFAULT_DM_LIM_LOG = (1.0, 1600.0)
 
 
 # -------------
@@ -698,7 +698,8 @@ def plot_rednoise_vs_dm(curves, freqs, dms, alpha=0.05, n_pointings=None,
                      like '$b$' works; "" for no title). Default: built from
                      selection_label and n_pointings.
         colorbar_log (bool): color by log(DM) instead of DM; dm_lim[0] must
-                     then be > 0, and DMs below it (e.g. DM 0) get the lowest color
+                     then be > 0; DMs below it (e.g. DM 0) get the lowest color
+                     without a warning, DMs above it the highest (with a warning)
 
     Returns:
     --------
@@ -736,8 +737,9 @@ def plot_rednoise_vs_dm(curves, freqs, dms, alpha=0.05, n_pointings=None,
         pts = np.concatenate(pts)
         _warn_outside("xlim (frequency)", pts[:, 0], *xlim, " Hz")
         _warn_outside("ylim (power)", pts[:, 1], *ylim)
-    # with a log colorbar, DM 0 is expected to sit below the range -- don't warn about it
-    _warn_outside("dm-lim (trial DM)", dms[dms > 0] if colorbar_log else dms,
+    # with a log colorbar, low trials (DM 0 up to the minimum) are expected to
+    # sit below the range -- only warn about DMs above it
+    _warn_outside("dm-lim (trial DM)", dms[dms >= dm_lim[0]] if colorbar_log else dms,
                   *dm_lim, " pc cm^-3")
 
     secax = ax.secondary_xaxis('top', functions=(freq_to_period, period_to_freq))
@@ -885,7 +887,7 @@ def _is_npz(path):
                    f"{DEFAULT_DM_LIM_LOG[0]:g} {DEFAULT_DM_LIM_LOG[1]:g} with --colorbar-log].")
 @click.option("--colorbar-log", is_flag=True, default=False,
               help="Color lines by DM on a logarithmic scale. MIN of --dm-lim must be "
-                   "> 0; the DM 0 trial gets the lowest color.")
+                   "> 0; trials below it (incl. DM 0) get the lowest color.")
 @click.option("--alpha", type=float, default=0.05, show_default=True,
               help="Line transparency.")
 @click.option("--workers", type=int, default=DEFAULT_WORKERS, show_default=True,
