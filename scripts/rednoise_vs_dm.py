@@ -5,7 +5,7 @@ rednoise_vs_dm.py
 Reads the combined rednoise medians HDF5 file (the output of
 combine_rednoise_medians.py) and plots, for a selection of pointings
 (by default Dec 90 +/- 5 deg), the rednoise medians as a function of
-frequency -- one line per DM trial, colored by trial DM on a rainbow
+frequency -- one line per DM trial, colored by trial DM on a jet
 colormap at low alpha.
 
 Selecting pointings
@@ -70,13 +70,14 @@ Usage
 
     # replot from a saved --output-npz file without re-reading the h5 file
     python3 rednoise_vs_dm.py rednoise_vs_dm.npz --output-plot replot.png --ylim 1e9 1e13
+    python3 rednoise_vs_dm.py rednoise_vs_dm.npz --title "Polar cap, Sept 2026"
 
 Replotting from a saved .npz
 ----------------------------
 --output-npz saves the plotted arrays (median, freqs, dms, counts) together
 with the selection that produced them. Passing that .npz instead of the h5
 file redraws the plot in seconds, with any --xlim/--ylim/--dm-lim/--alpha/
---dpi; plot_from_npz() does the same from Python. Selection options can't be
+--dpi/--title; plot_from_npz() does the same from Python. Selection options can't be
 used with an .npz input (its data is already selected).
 
 Plot limits
@@ -85,6 +86,11 @@ The frequency axis, power axis and DM colorbar use the same fixed limits on
 every run (DEFAULT_XLIM, DEFAULT_YLIM, DEFAULT_DM_LIM), so plots of different
 selections line up. Change them with --xlim, --ylim and --dm-lim; a warning
 is printed if any data fall outside them.
+
+--colorbar-log colors lines by log(DM) instead of DM, which spreads out the
+low-DM trials. A log scale can't include DM 0, so its default colorbar range
+is DEFAULT_DM_LIM_LOG (0.1-1700, 0.1 being about one DM step); the DM 0 trial
+is drawn in the lowest color.
 '''
 
 import json
@@ -105,7 +111,7 @@ import matplotlib.pyplot as plt
 plt.rcParams.update({'font.size': 14})
 import matplotlib as mpl
 mpl.rcParams['font.family'] = 'monospace'
-from matplotlib.colors import Normalize
+from matplotlib.colors import LogNorm, Normalize
 from matplotlib.cm import ScalarMappable
 from matplotlib.collections import LineCollection
 
@@ -152,6 +158,9 @@ DEFAULT_WORKERS = min(8, os.cpu_count() or 1)   # chunk-decompressing processes
 DEFAULT_XLIM = (1e-3, 1e3)
 DEFAULT_YLIM = (1e8, 1e14)
 DEFAULT_DM_LIM = (0.0, DEFAULT_MAXDM_CAP)
+#   log DM: a log scale can't reach 0, so it starts at ~one FDMT DM step
+#   (0.1012 pc cm^-3); the DM 0 trial is clipped to the lowest color
+DEFAULT_DM_LIM_LOG = (0.1, DEFAULT_MAXDM_CAP)
 
 
 # -------------
@@ -666,7 +675,8 @@ def _warn_outside(name, values, lo, hi, unit=""):
 
 def plot_rednoise_vs_dm(curves, freqs, dms, alpha=0.05, n_pointings=None,
                         dpi=150, output_path=None, selection_label=None,
-                        xlim=DEFAULT_XLIM, ylim=DEFAULT_YLIM, dm_lim=DEFAULT_DM_LIM):
+                        xlim=DEFAULT_XLIM, ylim=DEFAULT_YLIM, dm_lim=None,
+                        title=None, colorbar_log=False):
     '''
     Plot each DM trial's rednoise curve vs frequency, colored by trial DM.
     DM rows with a non-finite DM label are not drawn.
@@ -682,26 +692,35 @@ def plot_rednoise_vs_dm(curves, freqs, dms, alpha=0.05, n_pointings=None,
                                default Selection().label
         xlim, ylim (tuple): fixed frequency (Hz) / power axis limits
         dm_lim (tuple): fixed colorbar limits, pc cm^-3; lines outside get
-                        the end colors of the colormap
+                        the end colors of the colormap. Default DEFAULT_DM_LIM,
+                        or DEFAULT_DM_LIM_LOG with colorbar_log
+        title (str): plot title, used exactly as given (matplotlib mathtext
+                     like '$b$' works; "" for no title). Default: built from
+                     selection_label and n_pointings.
+        colorbar_log (bool): color by log(DM) instead of DM; dm_lim[0] must
+                     then be > 0, and DMs below it (e.g. DM 0) get the lowest color
 
     Returns:
     --------
         fig, ax, line_collection
     '''
     print("Generating plot.", flush=True)
+    if dm_lim is None:
+        dm_lim = DEFAULT_DM_LIM_LOG if colorbar_log else DEFAULT_DM_LIM
     _check_limits("xlim", *xlim, log=True)
     _check_limits("ylim", *ylim, log=True)
-    _check_limits("dm-lim", *dm_lim)
+    _check_limits("dm-lim", *dm_lim, log=colorbar_log)
     fig, ax = plt.subplots(1, figsize=(14, 8), dpi=dpi)
 
     dms = np.asarray(dms, dtype=np.float64)
     has_dm = np.isfinite(dms)
     curves, dms = np.asarray(curves)[has_dm], dms[has_dm]
 
-    # clip=True: a DM beyond dm_lim gets the end color instead of the
-    # colormap's out-of-range color
-    norm = Normalize(vmin=dm_lim[0], vmax=dm_lim[1], clip=True)
-    colors = plt.cm.rainbow(norm(dms))
+    # DMs beyond dm_lim get the end colors: clip them first, since LogNorm
+    # would otherwise turn DM 0 into a masked (invisible) value
+    norm_cls = LogNorm if colorbar_log else Normalize
+    norm = norm_cls(vmin=dm_lim[0], vmax=dm_lim[1], clip=True)
+    colors = plt.cm.jet(norm(np.clip(dms, dm_lim[0], dm_lim[1])))
 
     segments = build_segments(curves, freqs)
     lc = LineCollection(segments, colors=colors, alpha=alpha)
@@ -717,7 +736,9 @@ def plot_rednoise_vs_dm(curves, freqs, dms, alpha=0.05, n_pointings=None,
         pts = np.concatenate(pts)
         _warn_outside("xlim (frequency)", pts[:, 0], *xlim, " Hz")
         _warn_outside("ylim (power)", pts[:, 1], *ylim)
-    _warn_outside("dm-lim (trial DM)", dms, *dm_lim, " pc cm^-3")
+    # with a log colorbar, DM 0 is expected to sit below the range -- don't warn about it
+    _warn_outside("dm-lim (trial DM)", dms[dms > 0] if colorbar_log else dms,
+                  *dm_lim, " pc cm^-3")
 
     secax = ax.secondary_xaxis('top', functions=(freq_to_period, period_to_freq))
     secax.set_xlabel('Period (s)')
@@ -725,11 +746,12 @@ def plot_rednoise_vs_dm(curves, freqs, dms, alpha=0.05, n_pointings=None,
     ax.set_ylabel(r'$\mathrm{median}_{\mathrm{pointings}}\ \langle P_{\mathrm{rednoise}} \rangle_{\mathrm{days}}$')
     if selection_label is None:
         selection_label = Selection().label
-    title = f'Rednoise vs DM ({selection_label}'
-    title += f', {n_pointings} pointings)' if n_pointings is not None else ')'
+    if title is None:
+        title = f'Rednoise vs DM ({selection_label}'
+        title += f', {n_pointings} pointings)' if n_pointings is not None else ')'
     ax.set_title(title, pad=12)
 
-    cbar = fig.colorbar(ScalarMappable(cmap=plt.cm.rainbow, norm=norm), ax=ax)
+    cbar = fig.colorbar(ScalarMappable(cmap=plt.cm.jet, norm=norm), ax=ax)
     cbar.set_label(r'Trial DM (pc cm$^{-3}$)')
 
     plt.tight_layout()
@@ -795,7 +817,8 @@ def load_results(npz_path):
 
 
 def plot_from_npz(npz_path, output_path=None, alpha=0.05, dpi=150,
-                  xlim=DEFAULT_XLIM, ylim=DEFAULT_YLIM, dm_lim=DEFAULT_DM_LIM):
+                  xlim=DEFAULT_XLIM, ylim=DEFAULT_YLIM, dm_lim=None,
+                  title=None, colorbar_log=False):
     '''
     Redraw the rednoise-vs-DM plot from a .npz saved with --output-npz,
     without re-reading the combined medians file.
@@ -804,7 +827,9 @@ def plot_from_npz(npz_path, output_path=None, alpha=0.05, dpi=150,
     -------
         npz_path (Path): file saved by --output-npz / save_results()
         output_path (Path): save the plot here, otherwise plt.show()
-        alpha, dpi, xlim, ylim, dm_lim: as in plot_rednoise_vs_dm()
+        alpha, dpi, xlim, ylim, dm_lim, title, colorbar_log: as in
+                  plot_rednoise_vs_dm()
+                  (default title: built from the selection saved in the .npz)
 
     Returns:
     --------
@@ -816,7 +841,8 @@ def plot_from_npz(npz_path, output_path=None, alpha=0.05, dpi=150,
                                n_pointings=res["n_pointings"], dpi=dpi,
                                output_path=output_path,
                                selection_label=res["selection_label"],
-                               xlim=xlim, ylim=ylim, dm_lim=dm_lim)
+                               xlim=xlim, ylim=ylim, dm_lim=dm_lim, title=title,
+                               colorbar_log=colorbar_log)
 
 
 def _is_npz(path):
@@ -853,14 +879,23 @@ def _is_npz(path):
               metavar="MIN MAX", help="Fixed frequency axis limits, Hz.")
 @click.option("--ylim", type=(float, float), default=DEFAULT_YLIM, show_default=True,
               metavar="MIN MAX", help="Fixed power axis limits.")
-@click.option("--dm-lim", type=(float, float), default=DEFAULT_DM_LIM, show_default=True,
-              metavar="MIN MAX", help="Fixed DM colorbar limits, pc cm^-3.")
+@click.option("--dm-lim", type=(float, float), default=None, metavar="MIN MAX",
+              help=f"Fixed DM colorbar limits, pc cm^-3 [default: "
+                   f"{DEFAULT_DM_LIM[0]:g} {DEFAULT_DM_LIM[1]:g}, or "
+                   f"{DEFAULT_DM_LIM_LOG[0]:g} {DEFAULT_DM_LIM_LOG[1]:g} with --colorbar-log].")
+@click.option("--colorbar-log", is_flag=True, default=False,
+              help="Color lines by DM on a logarithmic scale. MIN of --dm-lim must be "
+                   "> 0; the DM 0 trial gets the lowest color.")
 @click.option("--alpha", type=float, default=0.05, show_default=True,
               help="Line transparency.")
 @click.option("--workers", type=int, default=DEFAULT_WORKERS, show_default=True,
               help="Processes decompressing HDF5 chunks in parallel. Each holds "
                    "~1-2 chunks in RAM at once (~0.9 GB uncompressed per chunk "
                    "for the full-size combined file).")
+@click.option("--title", type=str, default=None,
+              help="Plot title, used exactly as given (quote it; matplotlib mathtext "
+                   "like '$b$' works; \"\" for no title). Default: built from the "
+                   "selection and number of pointings.")
 @click.option("--dpi", type=float, default=150, show_default=True,
               help="Figure resolution.")
 @click.option("--output-plot", type=click.Path(dir_okay=False, path_type=Path), default=None,
@@ -870,7 +905,7 @@ def _is_npz(path):
                    ".npz, which can be passed back in as INPUT_FILE to replot.")
 def main(input_file, dec_center, dec_radius, zenith, b_center, b_radius, maxdm_cap,
          map_v1_3_path, map_v2_0_path, xlim, ylim, dm_lim, alpha, workers, dpi,
-         output_plot, output_npz):
+         output_plot, output_npz, title, colorbar_log):
     """
     Plot, for every DM trial, the median over pointings of the mean over
     days of the rednoise medians vs frequency, for a selection of pointings.
@@ -883,8 +918,11 @@ def main(input_file, dec_center, dec_radius, zenith, b_center, b_radius, maxdm_c
     try:
         _check_limits("xlim", *xlim, log=True)
         _check_limits("ylim", *ylim, log=True)
-        _check_limits("dm-lim", *dm_lim)
+        if dm_lim is not None:
+            _check_limits("dm-lim", *dm_lim, log=colorbar_log)
     except ValueError as e:
+        if colorbar_log and "dm-lim" in str(e):
+            e = ValueError(f"{e} (--colorbar-log needs a --dm-lim MIN above 0)")
         raise click.UsageError(str(e))
 
     if _is_npz(input_file):
@@ -897,7 +935,8 @@ def main(input_file, dec_center, dec_radius, zenith, b_center, b_radius, maxdm_c
                                    f".npz: its data was already selected when it was saved.")
         try:
             fig, _, _ = plot_from_npz(input_file, output_path=output_plot, alpha=alpha,
-                                      dpi=dpi, xlim=xlim, ylim=ylim, dm_lim=dm_lim)
+                                      dpi=dpi, xlim=xlim, ylim=ylim, dm_lim=dm_lim,
+                                      title=title, colorbar_log=colorbar_log)
         except (ValueError, OSError) as e:
             raise click.ClickException(str(e))
         plt.close(fig)
@@ -923,7 +962,8 @@ def main(input_file, dec_center, dec_radius, zenith, b_center, b_radius, maxdm_c
                                     n_pointings=res["n_pointings"], dpi=dpi,
                                     output_path=output_plot,
                                     selection_label=selection.label,
-                                    xlim=xlim, ylim=ylim, dm_lim=dm_lim)
+                                    xlim=xlim, ylim=ylim, dm_lim=dm_lim, title=title,
+                                    colorbar_log=colorbar_log)
     plt.close(fig)
 
 
