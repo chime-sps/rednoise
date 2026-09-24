@@ -67,6 +67,24 @@ Usage
         --alpha 0.05 --output-plot rednoise_vs_dm.png --output-npz rednoise_vs_dm.npz
     python3 rednoise_vs_dm.py combined_medians.h5 --zenith
     python3 rednoise_vs_dm.py combined_medians.h5 --b-center 0 --b-radius 5
+
+    # replot from a saved --output-npz file without re-reading the h5 file
+    python3 rednoise_vs_dm.py rednoise_vs_dm.npz --output-plot replot.png --ylim 1e9 1e13
+
+Replotting from a saved .npz
+----------------------------
+--output-npz saves the plotted arrays (median, freqs, dms, counts) together
+with the selection that produced them. Passing that .npz instead of the h5
+file redraws the plot in seconds, with any --xlim/--ylim/--dm-lim/--alpha/
+--dpi; plot_from_npz() does the same from Python. Selection options can't be
+used with an .npz input (its data is already selected).
+
+Plot limits
+-----------
+The frequency axis, power axis and DM colorbar use the same fixed limits on
+every run (DEFAULT_XLIM, DEFAULT_YLIM, DEFAULT_DM_LIM), so plots of different
+selections line up. Change them with --xlim, --ylim and --dm-lim; a warning
+is printed if any data fall outside them.
 '''
 
 import json
@@ -123,6 +141,17 @@ _ICRS_TO_GALACTIC = np.array([
 ])
 DEFAULT_MAXDM_CAP = 1700.0   # dedisp.maxdm in sps_pipeline/sps_config.yml
 DEFAULT_WORKERS = min(8, os.cpu_count() or 1)   # chunk-decompressing processes
+
+# Fixed plot limits, so plots of different selections can be compared
+# directly. Override with --xlim/--ylim/--dm-lim.
+#   x: covers the lowest rednoise bin (~0.02 Hz for a 2^20-sample spectrum)
+#      up to the Nyquist frequency 1 / (2 * TSAMP) ~ 509 Hz
+#   y: rednoise medians are ~1e9-1e11 per bin away from the low-frequency
+#      rise (the skymap's sum over ~45 bins is ~5e10-5e12), higher below
+#   DM: 0 up to the pipeline's dedisp.maxdm cap, the largest trial DM searched
+DEFAULT_XLIM = (1e-3, 1e3)
+DEFAULT_YLIM = (1e8, 1e14)
+DEFAULT_DM_LIM = (0.0, DEFAULT_MAXDM_CAP)
 
 
 # -------------
@@ -617,8 +646,27 @@ def build_segments(curves, freqs):
     return segments
 
 
+def _check_limits(name, lo, hi, log=False):
+    if not (np.isfinite(lo) and np.isfinite(hi) and lo < hi):
+        raise ValueError(f"{name} must be two finite numbers with min < max, got ({lo}, {hi}).")
+    if log and lo <= 0:
+        raise ValueError(f"{name} is on a log axis, so its min must be > 0, got {lo}.")
+
+
+def _warn_outside(name, values, lo, hi, unit=""):
+    values = np.asarray(values, dtype=np.float64)
+    values = values[np.isfinite(values)]
+    n_out = int(np.sum((values < lo) | (values > hi)))
+    if n_out:
+        print(f"  [WARN] {n_out}/{len(values)} {name} value(s) fall outside the fixed "
+              f"limits [{lo:g}, {hi:g}]{unit} (data span {values.min():.3g} to "
+              f"{values.max():.3g}); adjust with --{name.split()[0]}.", flush=True)
+    return n_out
+
+
 def plot_rednoise_vs_dm(curves, freqs, dms, alpha=0.05, n_pointings=None,
-                        dpi=150, output_path=None, selection_label=None):
+                        dpi=150, output_path=None, selection_label=None,
+                        xlim=DEFAULT_XLIM, ylim=DEFAULT_YLIM, dm_lim=DEFAULT_DM_LIM):
     '''
     Plot each DM trial's rednoise curve vs frequency, colored by trial DM.
     DM rows with a non-finite DM label are not drawn.
@@ -632,19 +680,27 @@ def plot_rednoise_vs_dm(curves, freqs, dms, alpha=0.05, n_pointings=None,
         output_path (Path): save here if given, otherwise plt.show()
         selection_label (str): title text for the pointing selection;
                                default Selection().label
+        xlim, ylim (tuple): fixed frequency (Hz) / power axis limits
+        dm_lim (tuple): fixed colorbar limits, pc cm^-3; lines outside get
+                        the end colors of the colormap
 
     Returns:
     --------
         fig, ax, line_collection
     '''
     print("Generating plot.", flush=True)
+    _check_limits("xlim", *xlim, log=True)
+    _check_limits("ylim", *ylim, log=True)
+    _check_limits("dm-lim", *dm_lim)
     fig, ax = plt.subplots(1, figsize=(14, 8), dpi=dpi)
 
     dms = np.asarray(dms, dtype=np.float64)
     has_dm = np.isfinite(dms)
     curves, dms = np.asarray(curves)[has_dm], dms[has_dm]
 
-    norm = Normalize(vmin=dms.min(), vmax=dms.max())
+    # clip=True: a DM beyond dm_lim gets the end color instead of the
+    # colormap's out-of-range color
+    norm = Normalize(vmin=dm_lim[0], vmax=dm_lim[1], clip=True)
     colors = plt.cm.rainbow(norm(dms))
 
     segments = build_segments(curves, freqs)
@@ -653,11 +709,15 @@ def plot_rednoise_vs_dm(curves, freqs, dms, alpha=0.05, n_pointings=None,
 
     ax.set_xscale('log')
     ax.set_yscale('log')
+    ax.set_xlim(*xlim)
+    ax.set_ylim(*ylim)
+
     pts = [s for s in segments if len(s)]
     if pts:
         pts = np.concatenate(pts)
-        ax.set_xlim(pts[:, 0].min() / 1.2, pts[:, 0].max() * 1.2)
-        ax.set_ylim(pts[:, 1].min() / 1.2, pts[:, 1].max() * 1.2)
+        _warn_outside("xlim (frequency)", pts[:, 0], *xlim, " Hz")
+        _warn_outside("ylim (power)", pts[:, 1], *ylim)
+    _warn_outside("dm-lim (trial DM)", dms, *dm_lim, " pc cm^-3")
 
     secax = ax.secondary_xaxis('top', functions=(freq_to_period, period_to_freq))
     secax.set_xlabel('Period (s)')
@@ -682,8 +742,89 @@ def plot_rednoise_vs_dm(curves, freqs, dms, alpha=0.05, n_pointings=None,
     return fig, ax, lc
 
 
+# -------------
+# saving + replotting from .npz
+# -------------
+
+NPZ_REQUIRED_KEYS = ("median", "freqs", "dms")
+
+
+def save_results(npz_path, res, selection):
+    '''
+    Save rednoise_vs_dm() output plus the selection that produced it, so
+    plot_from_npz() can redraw it with the right title.
+    '''
+    extra = dict(selection_label=np.array(selection.label))
+    if selection.dec is not None:
+        extra["selection_dec"] = np.array(selection.dec, dtype=np.float64)
+    if selection.b is not None:
+        extra["selection_b"] = np.array(selection.b, dtype=np.float64)
+    np.savez_compressed(npz_path, **res, **extra)
+
+
+def load_results(npz_path):
+    '''
+    Load a .npz written by save_results() (or by --output-npz).
+
+    Returns (dict):
+    --------
+        median (arr): (n_dm, n_freq)
+        freqs (arr): (n_freq,)
+        dms (arr): (n_dm,)
+        n_pointings (int or None)
+        selection_label (str): what was selected; for .npz files saved
+                               before the label was stored, the file name
+    '''
+    npz_path = Path(npz_path)
+    with np.load(npz_path, allow_pickle=False) as data:
+        missing = [k for k in NPZ_REQUIRED_KEYS if k not in data.files]
+        if missing:
+            raise ValueError(f"{npz_path} is missing {missing}; expected a file saved "
+                             f"by rednoise_vs_dm.py --output-npz.")
+        median = np.asarray(data["median"], dtype=np.float64)
+        freqs = np.asarray(data["freqs"], dtype=np.float64)
+        dms = np.asarray(data["dms"], dtype=np.float64)
+        n_pointings = int(data["n_pointings"]) if "n_pointings" in data.files else None
+        label = str(data["selection_label"]) if "selection_label" in data.files else npz_path.name
+
+    if median.ndim != 2 or median.shape != (len(dms), len(freqs)):
+        raise ValueError(f"{npz_path}: median has shape {median.shape}, expected "
+                         f"(len(dms), len(freqs)) = ({len(dms)}, {len(freqs)}).")
+    return dict(median=median, freqs=freqs, dms=dms, n_pointings=n_pointings,
+                selection_label=label)
+
+
+def plot_from_npz(npz_path, output_path=None, alpha=0.05, dpi=150,
+                  xlim=DEFAULT_XLIM, ylim=DEFAULT_YLIM, dm_lim=DEFAULT_DM_LIM):
+    '''
+    Redraw the rednoise-vs-DM plot from a .npz saved with --output-npz,
+    without re-reading the combined medians file.
+
+    Inputs:
+    -------
+        npz_path (Path): file saved by --output-npz / save_results()
+        output_path (Path): save the plot here, otherwise plt.show()
+        alpha, dpi, xlim, ylim, dm_lim: as in plot_rednoise_vs_dm()
+
+    Returns:
+    --------
+        fig, ax, line_collection
+    '''
+    print(f"Loading {npz_path} ...", flush=True)
+    res = load_results(npz_path)
+    return plot_rednoise_vs_dm(res["median"], res["freqs"], res["dms"], alpha=alpha,
+                               n_pointings=res["n_pointings"], dpi=dpi,
+                               output_path=output_path,
+                               selection_label=res["selection_label"],
+                               xlim=xlim, ylim=ylim, dm_lim=dm_lim)
+
+
+def _is_npz(path):
+    return Path(path).suffix.lower() == ".npz"
+
+
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
-@click.argument("h5_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("input_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--dec-center", type=float, default=None,
               help=f"Use pointings with |Dec - DEC_CENTER| <= DEC_RADIUS, degrees "
                    f"[default: {DEFAULT_DEC_CENTER:g}].")
@@ -708,6 +849,12 @@ def plot_rednoise_vs_dm(curves, freqs, dms, alpha=0.05, n_pointings=None,
               type=click.Path(exists=True, dir_okay=False, path_type=Path),
               default=POINTINGS_MAP_V2_0_PATH, show_default=True,
               help="Pointing map used on/after the cutover, and for pointing IDs.")
+@click.option("--xlim", type=(float, float), default=DEFAULT_XLIM, show_default=True,
+              metavar="MIN MAX", help="Fixed frequency axis limits, Hz.")
+@click.option("--ylim", type=(float, float), default=DEFAULT_YLIM, show_default=True,
+              metavar="MIN MAX", help="Fixed power axis limits.")
+@click.option("--dm-lim", type=(float, float), default=DEFAULT_DM_LIM, show_default=True,
+              metavar="MIN MAX", help="Fixed DM colorbar limits, pc cm^-3.")
 @click.option("--alpha", type=float, default=0.05, show_default=True,
               help="Line transparency.")
 @click.option("--workers", type=int, default=DEFAULT_WORKERS, show_default=True,
@@ -719,15 +866,43 @@ def plot_rednoise_vs_dm(curves, freqs, dms, alpha=0.05, n_pointings=None,
 @click.option("--output-plot", type=click.Path(dir_okay=False, path_type=Path), default=None,
               help="Save the plot to this file (default: display).")
 @click.option("--output-npz", type=click.Path(dir_okay=False, path_type=Path), default=None,
-              help="Also save median, freqs, dms and counts to this .npz.")
-def main(h5_file, dec_center, dec_radius, zenith, b_center, b_radius, maxdm_cap,
-         map_v1_3_path, map_v2_0_path, alpha, workers, dpi, output_plot, output_npz):
+              help="Also save median, freqs, dms, counts and the selection to this "
+                   ".npz, which can be passed back in as INPUT_FILE to replot.")
+def main(input_file, dec_center, dec_radius, zenith, b_center, b_radius, maxdm_cap,
+         map_v1_3_path, map_v2_0_path, xlim, ylim, dm_lim, alpha, workers, dpi,
+         output_plot, output_npz):
     """
     Plot, for every DM trial, the median over pointings of the mean over
-    days of the rednoise medians vs frequency, for a selection of pointings
-    in H5_FILE (the combined medians file made by combine_rednoise_medians.py).
+    days of the rednoise medians vs frequency, for a selection of pointings.
     Default selection: Dec 90 +/- 5. Lines are colored by trial DM.
+
+    INPUT_FILE is either the combined medians .h5 file made by
+    combine_rednoise_medians.py, or a .npz saved earlier with --output-npz,
+    which just redraws that plot (no h5 reading; selection options not allowed).
     """
+    try:
+        _check_limits("xlim", *xlim, log=True)
+        _check_limits("ylim", *ylim, log=True)
+        _check_limits("dm-lim", *dm_lim)
+    except ValueError as e:
+        raise click.UsageError(str(e))
+
+    if _is_npz(input_file):
+        used = [name for name, v in (("--dec-center", dec_center), ("--dec-radius", dec_radius),
+                                     ("--zenith", zenith or None), ("--b-center", b_center),
+                                     ("--b-radius", b_radius), ("--output-npz", output_npz))
+                if v is not None]
+        if used:
+            raise click.UsageError(f"{', '.join(used)} can't be used when INPUT_FILE is an "
+                                   f".npz: its data was already selected when it was saved.")
+        try:
+            fig, _, _ = plot_from_npz(input_file, output_path=output_plot, alpha=alpha,
+                                      dpi=dpi, xlim=xlim, ylim=ylim, dm_lim=dm_lim)
+        except (ValueError, OSError) as e:
+            raise click.ClickException(str(e))
+        plt.close(fig)
+        return
+
     try:
         selection = resolve_selection(zenith, dec_center, dec_radius, b_center, b_radius)
     except ValueError as e:
@@ -737,17 +912,18 @@ def main(h5_file, dec_center, dec_radius, zenith, b_center, b_radius, maxdm_cap,
     map_v1_3 = load_pointing_map(map_v1_3_path)
     map_v2_0 = load_pointing_map(map_v2_0_path)
 
-    res = rednoise_vs_dm(h5_file, map_v1_3, map_v2_0, selection=selection,
+    res = rednoise_vs_dm(input_file, map_v1_3, map_v2_0, selection=selection,
                          maxdm_cap=maxdm_cap, workers=workers)
 
     if output_npz:
-        np.savez_compressed(output_npz, **res)
+        save_results(output_npz, res, selection)
         print(f"Arrays saved to {output_npz}", flush=True)
 
     fig, _, _ = plot_rednoise_vs_dm(res["median"], res["freqs"], res["dms"], alpha=alpha,
                                     n_pointings=res["n_pointings"], dpi=dpi,
                                     output_path=output_plot,
-                                    selection_label=selection.label)
+                                    selection_label=selection.label,
+                                    xlim=xlim, ylim=ylim, dm_lim=dm_lim)
     plt.close(fig)
 
 
