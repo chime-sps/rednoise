@@ -173,8 +173,17 @@ def load_data(npz_path: Path, pointings_map_v1_3_path: Path, pointings_map_v2_0_
         # normalize by each row's own white noise level (last freq bin)
         # before averaging across days -- sum(row[5:]/last) == sum(row[5:])/last
         # since last is a per-row scalar, so this is equivalent to just
-        # dividing rn_sum directly.
-        last_bin = median_across_dms[:, -1]
+        # dividing rn_sum directly. median_across_dms is padded out to a
+        # fixed width with 0 or -1, so column -1 is only the white noise
+        # bin for the longest rows -- for shorter rows it's pad, not data.
+        # Grab each row's last non-pad bin instead.
+        is_pad = (median_across_dms == 0.0) | (median_across_dms == -1.0)
+        col = np.arange(median_across_dms.shape[1])
+        last_valid_idx = np.where(is_pad, -1, col).max(axis=1)
+        has_valid = last_valid_idx >= 0
+        last_bin = np.full(median_across_dms.shape[0], np.nan)
+        row_idx = np.nonzero(has_valid)[0]
+        last_bin[row_idx] = median_across_dms[row_idx, last_valid_idx[row_idx]]
         with np.errstate(divide="ignore", invalid="ignore"):
             rn_sum = rn_sum / last_bin
 
