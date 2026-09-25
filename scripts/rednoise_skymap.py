@@ -429,7 +429,7 @@ def _setup_axes(dpi=150):
 
 
 def plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=0.25,
-                 mask_radius_deg=None, dpi=150, nchan_weight=False, output_path=None):
+                 mask_radius_deg=None, dpi=150, nchan_weight=False, title=None, output_path=None):
     '''
     This function creates and then plots the rednoise skymap.
 
@@ -441,6 +441,7 @@ def plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=0.25,
         smooth_deg (float): Gaussian kernel FWHM in degrees
         display_res (float): regular lon/dec display-grid spacing in degrees
         nchan_weight (bool): if True, note the 1/nchan weighting on the colorbar label
+        title (str): optional override for the plot title
         output_path (str): optional path to save image if desired
     '''
     print("Gridding and smoothing ...", flush=True)
@@ -473,7 +474,8 @@ def plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=0.25,
     else:
         cbar_label = r'$\left\langle\ \mathrm{median}_{\mathrm{DM}}\left(\Sigma_{f>5}\ P_f\right)\ \right\rangle_{T_{\mathrm{exp}}}$'
     cbar.set_label(cbar_label, fontsize=13)
-    ax.set_title('Skymap of Rednoise Across CHAMPSS Observing Period', fontsize=20, fontweight='bold')
+    ax.set_title(title or 'Skymap of Rednoise Across CHAMPSS Observing Period',
+                 fontsize=20, fontweight='bold')
 
     plt.tight_layout()
 
@@ -533,12 +535,15 @@ def plot_coverage(ra, dec, dpi=150, output_path=None):
 @click.option("--normalize", "normalize", is_flag=True, default=False,
               help="Normalize each row by its own last freq bin (white noise "
                    "level) before averaging across days.")
+@click.option("--title", "title", type=str, default=None,
+              help="Override the skymap plot title (default: "
+                   "'Skymap of Rednoise Across CHAMPSS Observing Period').")
 @click.option("--output-skymap", type=click.Path(dir_okay=False, path_type=Path), default=None,
               help="Save sky map to this file (default: display).")
 @click.option("--output-coverage", type=click.Path(dir_okay=False, path_type=Path), default=None,
               help="Save coverage map to this file (default: display).")
 def main(npz_file, smooth_deg, display_res, mask_radius_deg, dpi, nchan_weight, normalize,
-         output_skymap, output_coverage):
+         title, output_skymap, output_coverage):
     """
     Plot the CHAMPSS rednoise skymap and coverage map from NPZ_FILE (the
     rednoise_dm_info.npz produced by rednoise_dm_behavior.py). Pointing
@@ -555,7 +560,7 @@ def main(npz_file, smooth_deg, display_res, mask_radius_deg, dpi, nchan_weight, 
     print("Plotting sky map...", flush=True)
     plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=display_res,
                 mask_radius_deg=mask_radius_deg, dpi=dpi, nchan_weight=nchan_weight,
-                output_path=output_skymap)
+                title=title, output_path=output_skymap)
 
     print("Plotting coverage map...", flush=True)
     plot_coverage(ra, dec, dpi=dpi, output_path=output_coverage)
