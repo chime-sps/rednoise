@@ -126,7 +126,7 @@ def nearest_pointing_values(tree, values, query_ra, query_dec, max_sep_deg=MAX_M
 
 
 def load_data(npz_path: Path, pointings_map_v1_3_path: Path, pointings_map_v2_0_path: Path,
-              nchan_weight: bool = False):
+              nchan_weight: bool = False, normalize: bool = False):
     """
     This function loads the DM info file and returns the relevant contents.
 
@@ -142,6 +142,11 @@ def load_data(npz_path: Path, pointings_map_v1_3_path: Path, pointings_map_v2_0_
             used for pointings on/after POINTINGS_MAP_CUTOVER
         nchan_weight (bool): if True, also weight rn_sum by 1/nchan per
             pointing (nchan looked up the same v1-3/v2-0 way as T_exp)
+        normalize (bool): if True, divide each row's median-power-vs-freq
+            by its own last frequency bin (the white noise level) before
+            summing over freq bins > 5, so different days/pointings are
+            compared relative to their own noise floor rather than in
+            absolute power
 
     Returns:
     --------
@@ -163,6 +168,15 @@ def load_data(npz_path: Path, pointings_map_v1_3_path: Path, pointings_map_v2_0_
 
     # take sum of median of medians across frequency bins after 5
     rn_sum = np.sum(median_across_dms[:, 5:], axis=1)
+
+    if normalize:
+        # normalize by each row's own white noise level (last freq bin)
+        # before averaging across days -- sum(row[5:]/last) == sum(row[5:])/last
+        # since last is a per-row scalar, so this is equivalent to just
+        # dividing rn_sum directly.
+        last_bin = median_across_dms[:, -1]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rn_sum = rn_sum / last_bin
 
     # check for data quality
     bad_rn = ~np.isfinite(rn_sum)
@@ -507,11 +521,14 @@ def plot_coverage(ra, dec, dpi=150, output_path=None):
               help="Figure resolution.")
 @click.option("--nchan-weight", "nchan_weight", is_flag=True, default=False,
               help="Weight rednoise values by 1/nchan before plotting.")
+@click.option("--normalize", "normalize", is_flag=True, default=False,
+              help="Normalize each row by its own last freq bin (white noise "
+                   "level) before averaging across days.")
 @click.option("--output-skymap", type=click.Path(dir_okay=False, path_type=Path), default=None,
               help="Save sky map to this file (default: display).")
 @click.option("--output-coverage", type=click.Path(dir_okay=False, path_type=Path), default=None,
               help="Save coverage map to this file (default: display).")
-def main(npz_file, smooth_deg, display_res, mask_radius_deg, dpi, nchan_weight,
+def main(npz_file, smooth_deg, display_res, mask_radius_deg, dpi, nchan_weight, normalize,
          output_skymap, output_coverage):
     """
     Plot the CHAMPSS rednoise skymap and coverage map from NPZ_FILE (the
@@ -524,7 +541,7 @@ def main(npz_file, smooth_deg, display_res, mask_radius_deg, dpi, nchan_weight,
             raise FileNotFoundError(f"Expected pointings map at {p}")
 
     ra, dec, mean_rn = load_data(npz_file, POINTINGS_MAP_V1_3_PATH, POINTINGS_MAP_V2_0_PATH,
-                                  nchan_weight=nchan_weight)
+                                  nchan_weight=nchan_weight, normalize=normalize)
 
     print("Plotting sky map...", flush=True)
     plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=display_res,
