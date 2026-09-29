@@ -125,8 +125,33 @@ def nearest_pointing_values(tree, values, query_ra, query_dec, max_sep_deg=MAX_M
     return np.where(sep_deg <= max_sep_deg, matched, np.nan)
 
 
+def last_valid_bin(median_across_dms):
+    """
+    Each row's last non-pad frequency bin value. median_across_dms is
+    padded out to a fixed width with 0 or -1, so a naive column -1 grab is
+    only the real white noise bin for the longest rows -- for shorter rows
+    it's pad, not data.
+
+    Inputs:
+    -------
+        median_across_dms (arr): rows x freq bins
+
+    Returns:
+    --------
+        last_bin (arr): one value per row, NaN if the whole row is pad
+    """
+    is_pad = (median_across_dms == 0.0) | (median_across_dms == -1.0)
+    col = np.arange(median_across_dms.shape[1])
+    last_valid_idx = np.where(is_pad, -1, col).max(axis=1)
+    has_valid = last_valid_idx >= 0
+    last_bin = np.full(median_across_dms.shape[0], np.nan)
+    row_idx = np.nonzero(has_valid)[0]
+    last_bin[row_idx] = median_across_dms[row_idx, last_valid_idx[row_idx]]
+    return last_bin
+
+
 def load_data(npz_path: Path, pointings_map_v1_3_path: Path, pointings_map_v2_0_path: Path,
-              nchan_weight: bool = False, normalize: bool = False):
+              nchan_weight: bool = False, normalize: bool = False, plot_whitenoise: bool = False):
     """
     This function loads the DM info file and returns the relevant contents.
 
@@ -147,6 +172,11 @@ def load_data(npz_path: Path, pointings_map_v1_3_path: Path, pointings_map_v2_0_
             summing over freq bins > 5, so different days/pointings are
             compared relative to their own noise floor rather than in
             absolute power
+        plot_whitenoise (bool): if True, plot the white noise level itself
+            (each row's last real frequency bin) instead of the summed red
+            noise, still Texp/Ndays-averaged the same way. Takes precedence
+            over normalize (dividing the white noise level by itself is a
+            no-op).
 
     Returns:
     --------
@@ -169,21 +199,17 @@ def load_data(npz_path: Path, pointings_map_v1_3_path: Path, pointings_map_v2_0_
     # take sum of median of medians across frequency bins after 5
     rn_sum = np.sum(median_across_dms[:, 5:], axis=1)
 
-    if normalize:
+    if plot_whitenoise:
+        # plot the white noise level itself (each row's last real freq
+        # bin) instead of the summed red noise -- it still goes through
+        # the same Texp/Ndays-weighted averaging below.
+        rn_sum = last_valid_bin(median_across_dms)
+    elif normalize:
         # normalize by each row's own white noise level (last freq bin)
         # before averaging across days -- sum(row[5:]/last) == sum(row[5:])/last
         # since last is a per-row scalar, so this is equivalent to just
-        # dividing rn_sum directly. median_across_dms is padded out to a
-        # fixed width with 0 or -1, so column -1 is only the white noise
-        # bin for the longest rows -- for shorter rows it's pad, not data.
-        # Grab each row's last non-pad bin instead.
-        is_pad = (median_across_dms == 0.0) | (median_across_dms == -1.0)
-        col = np.arange(median_across_dms.shape[1])
-        last_valid_idx = np.where(is_pad, -1, col).max(axis=1)
-        has_valid = last_valid_idx >= 0
-        last_bin = np.full(median_across_dms.shape[0], np.nan)
-        row_idx = np.nonzero(has_valid)[0]
-        last_bin[row_idx] = median_across_dms[row_idx, last_valid_idx[row_idx]]
+        # dividing rn_sum directly.
+        last_bin = last_valid_bin(median_across_dms)
         with np.errstate(divide="ignore", invalid="ignore"):
             rn_sum = rn_sum / last_bin
 
@@ -429,7 +455,8 @@ def _setup_axes(dpi=150):
 
 
 def plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=0.25,
-                 mask_radius_deg=None, dpi=150, nchan_weight=False, title=None, output_path=None):
+                 mask_radius_deg=None, dpi=150, nchan_weight=False, plot_whitenoise=False,
+                 title=None, output_path=None):
     '''
     This function creates and then plots the rednoise skymap.
 
@@ -441,6 +468,9 @@ def plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=0.25,
         smooth_deg (float): Gaussian kernel FWHM in degrees
         display_res (float): regular lon/dec display-grid spacing in degrees
         nchan_weight (bool): if True, note the 1/nchan weighting on the colorbar label
+        plot_whitenoise (bool): if True, label as the white noise level instead
+            of the summed red noise (mean_rn itself should already be computed
+            accordingly by load_data)
         title (str): optional override for the plot title
         output_path (str): optional path to save image if desired
     '''
@@ -469,13 +499,17 @@ def plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=0.25,
                          shading="nearest", rasterized=True)
 
     cbar = fig.colorbar(pcm, ax=ax, pad=0.02, shrink=0.8, orientation="vertical")
-    if nchan_weight:
-        cbar_label = r'$\left\langle\ \mathrm{median}_{\mathrm{DM}}\left(\Sigma_{f>5}\ P_f\right)\ \right\rangle_{T_{\mathrm{exp}}} / N_{\mathrm{chan}}$'
+    if plot_whitenoise:
+        cbar_label_body = r'\left\langle\ P_{\mathrm{last~bin}}\ \right\rangle_{T_{\mathrm{exp}}}'
     else:
-        cbar_label = r'$\left\langle\ \mathrm{median}_{\mathrm{DM}}\left(\Sigma_{f>5}\ P_f\right)\ \right\rangle_{T_{\mathrm{exp}}}$'
-    cbar.set_label(cbar_label, fontsize=13)
-    ax.set_title(title or 'Skymap of Rednoise Across CHAMPSS Observing Period',
-                 fontsize=20, fontweight='bold')
+        cbar_label_body = r'\left\langle\ \mathrm{median}_{\mathrm{DM}}\left(\Sigma_{f>5}\ P_f\right)\ \right\rangle_{T_{\mathrm{exp}}}'
+    if nchan_weight:
+        cbar_label_body += r' / N_{\mathrm{chan}}'
+    cbar.set_label(f'${cbar_label_body}$', fontsize=13)
+
+    default_title = ('Skymap of White Noise Across CHAMPSS Observing Period' if plot_whitenoise
+                      else 'Skymap of Rednoise Across CHAMPSS Observing Period')
+    ax.set_title(title or default_title, fontsize=20, fontweight='bold')
 
     plt.tight_layout()
 
@@ -535,15 +569,19 @@ def plot_coverage(ra, dec, dpi=150, output_path=None):
 @click.option("--normalize", "normalize", is_flag=True, default=False,
               help="Normalize each row by its own last freq bin (white noise "
                    "level) before averaging across days.")
+@click.option("--plot-whitenoise", "plot_whitenoise", is_flag=True, default=False,
+              help="Plot the white noise level (each row's last freq bin, "
+                   "Texp/Ndays-averaged) instead of the summed red noise. "
+                   "Takes precedence over --normalize.")
 @click.option("--title", "title", type=str, default=None,
-              help="Override the skymap plot title (default: "
-                   "'Skymap of Rednoise Across CHAMPSS Observing Period').")
+              help="Override the skymap plot title (default depends on "
+                   "--plot-whitenoise).")
 @click.option("--output-skymap", type=click.Path(dir_okay=False, path_type=Path), default=None,
               help="Save sky map to this file (default: display).")
 @click.option("--output-coverage", type=click.Path(dir_okay=False, path_type=Path), default=None,
               help="Save coverage map to this file (default: display).")
 def main(npz_file, smooth_deg, display_res, mask_radius_deg, dpi, nchan_weight, normalize,
-         title, output_skymap, output_coverage):
+         plot_whitenoise, title, output_skymap, output_coverage):
     """
     Plot the CHAMPSS rednoise skymap and coverage map from NPZ_FILE (the
     rednoise_dm_info.npz produced by rednoise_dm_behavior.py). Pointing
@@ -555,12 +593,13 @@ def main(npz_file, smooth_deg, display_res, mask_radius_deg, dpi, nchan_weight, 
             raise FileNotFoundError(f"Expected pointings map at {p}")
 
     ra, dec, mean_rn = load_data(npz_file, POINTINGS_MAP_V1_3_PATH, POINTINGS_MAP_V2_0_PATH,
-                                  nchan_weight=nchan_weight, normalize=normalize)
+                                  nchan_weight=nchan_weight, normalize=normalize,
+                                  plot_whitenoise=plot_whitenoise)
 
     print("Plotting sky map...", flush=True)
     plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=display_res,
                 mask_radius_deg=mask_radius_deg, dpi=dpi, nchan_weight=nchan_weight,
-                title=title, output_path=output_skymap)
+                plot_whitenoise=plot_whitenoise, title=title, output_path=output_skymap)
 
     print("Plotting coverage map...", flush=True)
     plot_coverage(ra, dec, dpi=dpi, output_path=output_coverage)
