@@ -4,8 +4,14 @@ combine_medians.py
 ==================
 Walks a directory tree of the form:
     {year}/{month}/{day}/{RA}_{Dec}/medians.npz
+    {year}/{month}/{day}/{RA}_{Dec}/medians_0.npz, medians_1.npz, medians_2.npz, ...
 
-Each medians.npz contains an array of shape (1, n_dm, n_freq_bins).
+Each pointing directory is checked for both the legacy 'medians.npz' name
+and any current sharded 'medians_<N>.npz' files -- both conventions may be
+present on disk at once, and every rednoise npz file found becomes its own
+row in the output (see _find_npz_files_in / find_npz_paths).
+
+Each medians npz file contains an array of shape (1, n_dm, n_freq_bins).
 Because different files may have different n_dm and n_freq_bins, all arrays
 are padded to the global maximum along each axis with -1 (a sentinel flag).
 
@@ -47,6 +53,7 @@ Usage
 """
 
 import argparse
+import re
 import sys
 import threading
 import queue
@@ -127,11 +134,46 @@ class _ScanLimitReached(Exception):
     """Internal control-flow signal: stop the directory walk early."""
 
 
+# A pointing directory's rednoise file is either the legacy 'medians.npz',
+# or one of the current sharded 'medians_0.npz', 'medians_1.npz',
+# 'medians_2.npz', ... files. Both conventions are checked for, since older
+# runs on disk still use the legacy name while newer ones use the sharded
+# one -- a directory using only the new naming was previously invisible to
+# this script (it only ever looked for the exact name "medians.npz"),
+# which silently dropped every pointing that had already been migrated to
+# the new convention.
+_NPZ_NAME_RE = re.compile(r"^medians(?:_(\d+))?\.npz$")
+
+
+def _find_npz_files_in(ra_dec_dir: Path) -> list:
+    """
+    Return every rednoise npz file directly inside one pointing directory,
+    matching either 'medians.npz' or 'medians_<N>.npz'. Both can be present
+    at once (e.g. a directory mid-migration from the old to the new
+    convention) -- all matches are returned, not just one. Numbered shards
+    are sorted numerically (medians_2.npz before medians_10.npz), with the
+    legacy 'medians.npz' sorted first.
+    """
+    matches = []
+    for p in ra_dec_dir.iterdir():
+        if not p.is_file():
+            continue
+        m = _NPZ_NAME_RE.match(p.name)
+        if m is None:
+            continue
+        shard_index = int(m.group(1)) if m.group(1) is not None else -1
+        matches.append((shard_index, p))
+    matches.sort(key=lambda t: t[0])
+    return [p for _, p in matches]
+
+
 def find_npz_paths(root: Path, limit: int | None = None) -> list:
     """
     Return a list of (path_str, year, month, day, ra, dec) for every
-    medians.npz found under root, descending only into 4-digit year dirs.
-    Shows a live counter during the scan.
+    rednoise npz file found under root -- one entry per 'medians.npz' or
+    'medians_<N>.npz' file inside each pointing directory (see
+    _find_npz_files_in) -- descending only into 4-digit year dirs. Shows a
+    live counter during the scan.
 
     If `limit` is given, the walk stops as soon as `limit` files have been
     found -- it does not keep scanning the rest of the tree first and
@@ -167,8 +209,8 @@ def find_npz_paths(root: Path, limit: int | None = None) -> list:
                         for ra_dec_dir in sorted(day_dir.iterdir()):
                             if not ra_dec_dir.is_dir():
                                 continue
-                            npz_path = ra_dec_dir / "medians.npz"
-                            if not npz_path.exists():
+                            npz_paths = _find_npz_files_in(ra_dec_dir)
+                            if not npz_paths:
                                 continue
                             try:
                                 year  = int(year_dir.name)
@@ -178,12 +220,13 @@ def find_npz_paths(root: Path, limit: int | None = None) -> list:
                                 ra  = float(ra_str)
                                 dec = float(dec_str)
                             except (ValueError, IndexError) as exc:
-                                tqdm.write(f"  [SKIP] Bad path {npz_path}: {exc}")
+                                tqdm.write(f"  [SKIP] Bad path {ra_dec_dir}: {exc}")
                                 continue
-                            found.append((str(npz_path), year, month, day, ra, dec))
-                            scan_bar.update(1)
-                            if limit is not None and len(found) >= limit:
-                                raise _ScanLimitReached
+                            for npz_path in npz_paths:
+                                found.append((str(npz_path), year, month, day, ra, dec))
+                                scan_bar.update(1)
+                                if limit is not None and len(found) >= limit:
+                                    raise _ScanLimitReached
     except _ScanLimitReached:
         pass
     return found
