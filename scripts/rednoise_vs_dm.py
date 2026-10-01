@@ -745,7 +745,7 @@ def plot_rednoise_vs_dm(curves, freqs, dms, alpha=0.05, n_pointings=None,
     secax = ax.secondary_xaxis('top', functions=(freq_to_period, period_to_freq))
     secax.set_xlabel('Period (s)')
     ax.set_xlabel('Frequency (Hz)')
-    ax.set_ylabel(r'$\mathrm{median}_{\mathrm{pointings}}\ \langle P_{\mathrm{rednoise}} \rangle_{\mathrm{days}}$')
+    ax.set_ylabel(r'Median of \langle P_{\mathrm{rednoise}} \rangle_{\mathrm{days}}$ Across Pointings')
     if selection_label is None:
         selection_label = Selection().label
     if title is None:
