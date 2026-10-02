@@ -424,9 +424,197 @@ def ra_deg_to_hours(ra_deg):
     return ra_deg / 15.0
 
 
+# --------
+# sun/moon ephemeris, so we can trace their paths over the observation
+# (low-precision formulas, no astropy dependency -- good to ~0.01 deg for
+# the Sun and ~0.1 deg for the Moon, plenty for an overlay on the skymap)
+# --------
+
+def _julian_date(year, month, day, hour=12.0):
+    '''
+    Calendar date (UTC) -> Julian Date. Defaults to local noon of that date.
+
+    Inputs:
+    -------
+        year, month, day (arr or scalar)
+        hour (float): UTC hour of day to evaluate at
+
+    Returns:
+    --------
+        jd (arr or scalar)
+    '''
+    year = np.asarray(year, dtype=np.float64)
+    month = np.asarray(month, dtype=np.float64)
+    day = np.asarray(day, dtype=np.float64) + hour / 24.0
+    y = np.where(month <= 2, year - 1, year)
+    m = np.where(month <= 2, month + 12, month)
+    a = np.floor(y / 100.0)
+    b = 2 - a + np.floor(a / 4.0)
+    return np.floor(365.25 * (y + 4716)) + np.floor(30.6001 * (m + 1)) + day + b - 1524.5
+
+
+def observation_date_range(npz_path: Path):
+    '''
+    Daily Julian Date grid (local noon) spanning the first to last day of
+    observation recorded in npz_path, for tracing the Sun/Moon over the
+    same period.
+
+    Inputs:
+    -------
+        npz_path (Path): path to the DM info file
+
+    Returns:
+    --------
+        jd_grid (arr): one JD per day, min day to max day inclusive
+    '''
+    data = np.load(npz_path)
+    info = data["info"]
+    jd = _julian_date(info[:, 2].astype(int), info[:, 3].astype(int), info[:, 4].astype(int))
+    return np.arange(np.floor(jd.min()), np.floor(jd.max()) + 1.0) + 0.5
+
+
+def sun_radec(jd):
+    '''
+    Geocentric apparent RA/Dec of the Sun (low-precision, Meeus ch. 25
+    abbreviated formula -- good to about 0.01 deg).
+
+    Inputs:
+    -------
+        jd (arr): Julian Date(s)
+
+    Returns:
+    --------
+        ra_deg (arr), dec_deg (arr)
+    '''
+    T = (jd - 2451545.0) / 36525.0
+    L0 = (280.46646 + 36000.76983 * T + 0.0003032 * T**2) % 360.0
+    M = (357.52911 + 35999.05029 * T - 0.0001537 * T**2) % 360.0
+    Mr = np.deg2rad(M)
+    C = ((1.914602 - 0.004817 * T - 0.000014 * T**2) * np.sin(Mr)
+         + (0.019993 - 0.000101 * T) * np.sin(2 * Mr)
+         + 0.000289 * np.sin(3 * Mr))
+    true_lon = (L0 + C) % 360.0
+    epsilon = 23.439291 - 0.0130042 * T - 0.00000016 * T**2 + 0.000000504 * T**3
+
+    lon_r, eps_r = np.deg2rad(true_lon), np.deg2rad(epsilon)
+    ra = np.rad2deg(np.arctan2(np.cos(eps_r) * np.sin(lon_r), np.cos(lon_r))) % 360.0
+    dec = np.rad2deg(np.arcsin(np.sin(eps_r) * np.sin(lon_r)))
+    return ra, dec
+
+
+def moon_radec(jd):
+    '''
+    Geocentric RA/Dec of the Moon (low-precision Keplerian orbit + main
+    perturbation terms, per Paul Schlyter's "How to compute planetary
+    positions" -- good to about 0.1-0.3 deg, plenty for an overlay here).
+
+    Inputs:
+    -------
+        jd (arr): Julian Date(s)
+
+    Returns:
+    --------
+        ra_deg (arr), dec_deg (arr)
+    '''
+    d = jd - 2451543.5  # days since this algorithm's own epoch (~J2000)
+
+    # Moon's orbital elements (deg)
+    N = (125.1228 - 0.0529538083 * d) % 360.0
+    i = 5.1454
+    w = (318.0634 + 0.1643573223 * d) % 360.0
+    a = 60.2666  # earth radii
+    e = 0.054900
+    M = (115.3654 + 13.0649929509 * d) % 360.0
+
+    # Sun's mean elements, needed for the Moon's perturbation terms below
+    Ms = (356.0470 + 0.9856002585 * d) % 360.0
+    ws = (282.9404 + 0.0000470935 * d) % 360.0
+    Ls = (Ms + ws) % 360.0
+
+    E = M + np.rad2deg(e) * np.sin(np.deg2rad(M)) * (1 + e * np.cos(np.deg2rad(M)))
+    for _ in range(4):
+        Er = np.deg2rad(E)
+        E = E - (E - np.rad2deg(e) * np.sin(Er) - M) / (1 - e * np.cos(Er))
+    Er = np.deg2rad(E)
+
+    xv = a * (np.cos(Er) - e)
+    yv = a * (np.sqrt(1 - e**2) * np.sin(Er))
+    v = np.rad2deg(np.arctan2(yv, xv)) % 360.0
+    r = np.sqrt(xv**2 + yv**2)
+
+    Nr, ir = np.deg2rad(N), np.deg2rad(i)
+    vwr = np.deg2rad((v + w) % 360.0)
+    xh = r * (np.cos(Nr) * np.cos(vwr) - np.sin(Nr) * np.sin(vwr) * np.cos(ir))
+    yh = r * (np.sin(Nr) * np.cos(vwr) + np.cos(Nr) * np.sin(vwr) * np.cos(ir))
+    zh = r * (np.sin(vwr) * np.sin(ir))
+
+    lon = np.rad2deg(np.arctan2(yh, xh)) % 360.0
+    lat = np.rad2deg(np.arctan2(zh, np.sqrt(xh**2 + yh**2)))
+
+    Lm = (N + w + M) % 360.0  # moon's mean longitude
+    D = (Lm - Ls) % 360.0     # moon's mean elongation from the sun
+    F = (Lm - N) % 360.0      # moon's argument of latitude
+
+    Mr_, Msr, Dr, Fr = np.deg2rad(M), np.deg2rad(Ms), np.deg2rad(D), np.deg2rad(F)
+    dlon = (
+        -1.274 * np.sin(Mr_ - 2 * Dr)
+        + 0.658 * np.sin(2 * Dr)
+        - 0.186 * np.sin(Msr)
+        - 0.059 * np.sin(2 * Mr_ - 2 * Dr)
+        - 0.057 * np.sin(Mr_ - 2 * Dr + Msr)
+        + 0.053 * np.sin(Mr_ + 2 * Dr)
+        + 0.046 * np.sin(2 * Dr - Msr)
+        + 0.041 * np.sin(Mr_ - Msr)
+        - 0.035 * np.sin(Dr)
+        - 0.031 * np.sin(Mr_ + Msr)
+        - 0.015 * np.sin(2 * Fr - 2 * Dr)
+        + 0.011 * np.sin(Mr_ - 4 * Dr)
+    )
+    dlat = (
+        -0.173 * np.sin(Fr - 2 * Dr)
+        - 0.055 * np.sin(Mr_ - Fr - 2 * Dr)
+        - 0.046 * np.sin(Mr_ + Fr - 2 * Dr)
+        + 0.033 * np.sin(Fr + 2 * Dr)
+        + 0.017 * np.sin(2 * Mr_ + Fr)
+    )
+    lon = (lon + dlon) % 360.0
+    lat = lat + dlat
+
+    lon_r, lat_r = np.deg2rad(lon), np.deg2rad(lat)
+    eps_r = np.deg2rad(23.439291 - 0.0130042 * ((jd - 2451545.0) / 36525.0))
+
+    xg = np.cos(lon_r) * np.cos(lat_r)
+    yg = np.sin(lon_r) * np.cos(lat_r)
+    zg = np.sin(lat_r)
+
+    xe = xg
+    ye = yg * np.cos(eps_r) - zg * np.sin(eps_r)
+    ze = yg * np.sin(eps_r) + zg * np.cos(eps_r)
+
+    ra = np.rad2deg(np.arctan2(ye, xe)) % 360.0
+    dec = np.rad2deg(np.arcsin(ze))
+    return ra, dec
+
+
 # -------
 # plotting stuff
 # -------
+
+def _plot_radec_path(ax, ra_deg, dec_deg, **kwargs):
+    '''
+    Plot a dashed line of RA/Dec points (e.g. the Sun or Moon's daily
+    position) on our Mollweide axes, breaking the line wherever it crosses
+    the RA=0/360 seam so we don't draw a spurious chord across the whole
+    plot.
+    '''
+    lon_rad = ra_deg_to_moll_rad(ra_deg)
+    dec_rad = dec_deg_to_moll_rad(dec_deg)
+    seam = np.where(np.abs(np.diff(lon_rad)) > np.pi)[0] + 1
+    label = kwargs.pop("label", None)
+    for seg_idx, (seg_lon, seg_dec) in enumerate(zip(np.split(lon_rad, seam), np.split(dec_rad, seam))):
+        # only label the first segment, so a seam-crossing path doesn't get
+        # a duplicate legend entry per segment
+        ax.plot(seg_lon, seg_dec, label=label if seg_idx == 0 else None, **kwargs)
 
 def _setup_axes(dpi=150):
     '''
@@ -456,7 +644,7 @@ def _setup_axes(dpi=150):
 
 def plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=0.25,
                  mask_radius_deg=None, dpi=150, nchan_weight=False, plot_whitenoise=False,
-                 title=None, output_path=None):
+                 title=None, sun_path=None, moon_path=None, output_path=None):
     '''
     This function creates and then plots the rednoise skymap.
 
@@ -472,6 +660,9 @@ def plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=0.25,
             of the summed red noise (mean_rn itself should already be computed
             accordingly by load_data)
         title (str): optional override for the plot title
+        sun_path (tuple): optional (ra_deg, dec_deg) of the Sun over the
+            observation, traced as a dashed line
+        moon_path (tuple): same, for the Moon
         output_path (str): optional path to save image if desired
     '''
     print("Gridding and smoothing ...", flush=True)
@@ -511,6 +702,15 @@ def plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=0.25,
                       else 'Skymap of Rednoise Across CHAMPSS Observing Period')
     ax.set_title(title or default_title, fontsize=20, fontweight='bold')
 
+    if sun_path is not None:
+        _plot_radec_path(ax, sun_path[0], sun_path[1], linestyle="--", color="gold",
+                          linewidth=1.5, zorder=5, label="Sun")
+    if moon_path is not None:
+        _plot_radec_path(ax, moon_path[0], moon_path[1], linestyle="--", color="silver",
+                          linewidth=1.5, zorder=5, label="Moon")
+    if sun_path is not None or moon_path is not None:
+        ax.legend(loc="lower left", fontsize=10, framealpha=0.8)
+
     plt.tight_layout()
 
     if output_path:
@@ -522,7 +722,7 @@ def plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=0.25,
     plt.close(fig)
 
 
-def plot_coverage(ra, dec, dpi=150, output_path=None):
+def plot_coverage(ra, dec, dpi=150, sun_path=None, moon_path=None, output_path=None):
     '''
     This function plots a dot on our Mollweide axes for each pointing with data.
 
@@ -530,6 +730,9 @@ def plot_coverage(ra, dec, dpi=150, output_path=None):
     -------
         ra (arr)
         dec (arr)
+        sun_path (tuple): optional (ra_deg, dec_deg) of the Sun over the
+            observation, traced as a dashed line
+        moon_path (tuple): same, for the Moon
         output_path (str): optional path to save image if desired
     '''
     fig, ax = _setup_axes(dpi=dpi)
@@ -540,6 +743,15 @@ def plot_coverage(ra, dec, dpi=150, output_path=None):
     ax.scatter(ra_moll, dec_moll, c="hotpink",
                s=1.5, alpha=0.5, linewidths=0, rasterized=True)
     ax.set_title(f'Pointing Coverage Map', fontsize=20, fontweight='bold')
+
+    if sun_path is not None:
+        _plot_radec_path(ax, sun_path[0], sun_path[1], linestyle="--", color="gold",
+                          linewidth=1.5, zorder=5, label="Sun")
+    if moon_path is not None:
+        _plot_radec_path(ax, moon_path[0], moon_path[1], linestyle="--", color="silver",
+                          linewidth=1.5, zorder=5, label="Moon")
+    if sun_path is not None or moon_path is not None:
+        ax.legend(loc="lower left", fontsize=10, framealpha=0.8)
 
     plt.tight_layout()
 
@@ -596,13 +808,20 @@ def main(npz_file, smooth_deg, display_res, mask_radius_deg, dpi, nchan_weight, 
                                   nchan_weight=nchan_weight, normalize=normalize,
                                   plot_whitenoise=plot_whitenoise)
 
+    print("Tracing Sun/Moon paths over the observation...", flush=True)
+    jd_grid = observation_date_range(npz_file)
+    sun_path = sun_radec(jd_grid)
+    moon_path = moon_radec(jd_grid)
+
     print("Plotting sky map...", flush=True)
     plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=display_res,
                 mask_radius_deg=mask_radius_deg, dpi=dpi, nchan_weight=nchan_weight,
-                plot_whitenoise=plot_whitenoise, title=title, output_path=output_skymap)
+                plot_whitenoise=plot_whitenoise, title=title,
+                sun_path=sun_path, moon_path=moon_path, output_path=output_skymap)
 
     print("Plotting coverage map...", flush=True)
-    plot_coverage(ra, dec, dpi=dpi, output_path=output_coverage)
+    plot_coverage(ra, dec, dpi=dpi, sun_path=sun_path, moon_path=moon_path,
+                  output_path=output_coverage)
 
 
 if __name__ == "__main__":
