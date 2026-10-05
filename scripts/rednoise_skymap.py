@@ -665,19 +665,17 @@ def moon_average_path(jd_grid, n_phase_bins=100):
 
 def _plot_radec_path(ax, ra_deg, dec_deg, **kwargs):
     '''
-    Plot a dashed line of RA/Dec points (e.g. the Sun or Moon's daily
-    position) on our Mollweide axes, breaking the line wherever it crosses
-    the RA=0/360 seam so we don't draw a spurious chord across the whole
-    plot.
+    Plot a path of RA/Dec points (e.g. the Sun or Moon's position) on our
+    Mollweide axes as a single line/legend entry, inserting a gap (NaN)
+    wherever it crosses the RA=0/360 seam so we don't draw a spurious
+    chord across the whole plot.
     '''
     lon_rad = ra_deg_to_moll_rad(ra_deg)
     dec_rad = dec_deg_to_moll_rad(dec_deg)
     seam = np.where(np.abs(np.diff(lon_rad)) > np.pi)[0] + 1
-    label = kwargs.pop("label", None)
-    for seg_idx, (seg_lon, seg_dec) in enumerate(zip(np.split(lon_rad, seam), np.split(dec_rad, seam))):
-        # only label the first segment, so a seam-crossing path doesn't get
-        # a duplicate legend entry per segment
-        ax.plot(seg_lon, seg_dec, label=label if seg_idx == 0 else None, **kwargs)
+    lon_rad = np.insert(lon_rad, seam, np.nan)
+    dec_rad = np.insert(dec_rad, seam, np.nan)
+    ax.plot(lon_rad, dec_rad, **kwargs)
 
 def _setup_axes(dpi=150):
     '''
