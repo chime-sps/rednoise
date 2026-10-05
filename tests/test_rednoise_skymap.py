@@ -464,3 +464,180 @@ def test_gap_between_coverage_islands_stays_blank():
         f"islands (15 deg from either, well past mask_radius_deg=2.0) to "
         f"be masked out; got {mid_gap} instead."
     )
+
+
+# ---------------------------------------------------------------------------
+# --from-after / --from-before date filtering
+#
+# NOTE: THESE TESTS WERE WRITTEN BY CLAUDE.
+#
+# Both limits are exclusive: --from-after 20260226 keeps Feb 27th 2026
+# onwards, --from-before 20260227 keeps up to and including Feb 26th 2026.
+# The filter has to apply to the data that gets averaged AND to the date
+# span the Sun/Moon paths are traced over.
+# ---------------------------------------------------------------------------
+
+import json  # noqa: E402
+
+import matplotlib  # noqa: E402
+matplotlib.use("Agg")
+from click.testing import CliRunner  # noqa: E402
+
+import rednoise_skymap as rs  # noqa: E402
+
+
+def _write_date_test_files(tmp_path):
+    """
+    One pointing (RA 120, Dec 40) observed on five days straddling
+    2026-02-26/27, each day with a different, easily recognisable value:
+    the sum over freq bins > 5 of a row is 10 * (row number + 1).
+
+    A second pointing (RA 200, Dec 10) is observed only on the two days
+    before the boundary, so a --from-after 20260226 run must drop it
+    from the coverage entirely.
+
+    The same pointing map (same "length") is written for v1-3 and v2-0 so
+    the T_exp weights are identical on both sides of the map cutover and
+    plain means are the expected answer.
+    """
+    dates = [(2026, 2, 25), (2026, 2, 26), (2026, 2, 27), (2026, 2, 28), (2026, 3, 1)]
+    rows = [(120.0, 40.0, *d) for d in dates] + [(200.0, 10.0, *d) for d in dates[:2]]
+    n = len(rows)
+    info = np.zeros((n, 7))
+    info[:, :5] = rows
+    median_across_dms = np.zeros((n, 10), dtype=np.float32)
+    median_across_dms[:, :5] = 1e6                      # bins <= 5: ignored by the sum
+    median_across_dms[:, 5:] = (2.0 * (np.arange(n) + 1))[:, None]   # 5 bins -> sum 10*(i+1)
+
+    npz = tmp_path / "rednoise_dm_info.npz"
+    np.savez(npz, info=info, median_across_dms=median_across_dms)
+
+    pointings = [dict(ra=120.0, dec=40.0, length=368640, nchans=1024, maxdm=100.0),
+                 dict(ra=200.0, dec=10.0, length=368640, nchans=1024, maxdm=100.0)]
+    map_path = tmp_path / "pointings_map.json"
+    map_path.write_text(json.dumps(pointings))
+    return npz, map_path
+
+
+def test_parse_yyyymmdd():
+    assert rs.parse_yyyymmdd("20260226") == 20260226
+    assert rs.parse_yyyymmdd(20260226) == 20260226
+    for bad in ["2026-02-26", "260226", "20260230", "20261301", "abcdefgh", ""]:
+        with pytest.raises(ValueError):
+            rs.parse_yyyymmdd(bad)
+
+
+def test_date_filter_mask_limits_are_exclusive():
+    year = np.array([2026, 2026, 2026, 2026, 2025])
+    month = np.array([2, 2, 2, 3, 12])
+    day = np.array([25, 26, 27, 1, 31])
+
+    # no limits: everything
+    assert rs.date_filter_mask(year, month, day).all()
+    # --from-after 20260226 -> Feb 27th onwards; Feb 26th itself is excluded
+    np.testing.assert_array_equal(
+        rs.date_filter_mask(year, month, day, from_after=20260226),
+        [False, False, True, True, False])
+    # --from-before 20260227 -> up to and including Feb 26th
+    np.testing.assert_array_equal(
+        rs.date_filter_mask(year, month, day, from_before=20260227),
+        [True, True, False, False, True])
+    # both: a window, across a year boundary too
+    np.testing.assert_array_equal(
+        rs.date_filter_mask(year, month, day, from_after=20251231, from_before=20260227),
+        [True, True, False, False, False])
+
+
+def test_load_data_only_averages_rows_inside_the_date_window(tmp_path):
+    npz, map_path = _write_date_test_files(tmp_path)
+
+    def value_at(ra_pt, dec_pt, mean_rn, ra):
+        return float(mean_rn[np.argmin(np.abs(ra_pt - ra))])
+
+    # no filter: mean of 10..50 at the first pointing, 60,70 at the second
+    ra_pt, dec_pt, mean_rn = rs.load_data(npz, map_path, map_path)
+    assert len(ra_pt) == 2
+    assert value_at(ra_pt, dec_pt, mean_rn, 120.0) == pytest.approx(30.0)
+    assert value_at(ra_pt, dec_pt, mean_rn, 200.0) == pytest.approx(65.0)
+
+    # --from-after 20260226: Feb 27, Feb 28, Mar 1 -> mean(30, 40, 50); the
+    # second pointing (only observed Feb 25-26) drops out of the map
+    ra_pt, dec_pt, mean_rn = rs.load_data(npz, map_path, map_path, from_after=20260226)
+    assert len(ra_pt) == 1 and ra_pt[0] == pytest.approx(120.0)
+    assert mean_rn[0] == pytest.approx(40.0)
+
+    # --from-before 20260227: Feb 25, Feb 26 -> mean(10, 20) and mean(60, 70)
+    ra_pt, dec_pt, mean_rn = rs.load_data(npz, map_path, map_path, from_before=20260227)
+    assert len(ra_pt) == 2
+    assert value_at(ra_pt, dec_pt, mean_rn, 120.0) == pytest.approx(15.0)
+    assert value_at(ra_pt, dec_pt, mean_rn, 200.0) == pytest.approx(65.0)
+
+    # both: only Feb 27 and Feb 28 -> mean(30, 40)
+    ra_pt, dec_pt, mean_rn = rs.load_data(npz, map_path, map_path,
+                                          from_after=20260226, from_before=20260301)
+    assert len(ra_pt) == 1 and mean_rn[0] == pytest.approx(35.0)
+
+    with pytest.raises(ValueError, match="No observations"):
+        rs.load_data(npz, map_path, map_path, from_after=20270101)
+
+
+def test_sun_moon_date_range_follows_the_date_window(tmp_path):
+    npz, _ = _write_date_test_files(tmp_path)
+    # all five days, Feb 25 - Mar 1 inclusive
+    assert len(rs.observation_date_range(npz)) == 5
+    # Feb 27 - Mar 1
+    jd = rs.observation_date_range(npz, from_after=20260226)
+    assert len(jd) == 3
+    assert jd[0] == pytest.approx(float(rs._julian_date(2026, 2, 27)))
+    # Feb 25 - Feb 26
+    jd = rs.observation_date_range(npz, from_before=20260227)
+    assert len(jd) == 2
+    assert jd[-1] == pytest.approx(float(rs._julian_date(2026, 2, 26)))
+
+
+def test_cli_from_after_and_from_before(tmp_path, monkeypatch):
+    npz, map_path = _write_date_test_files(tmp_path)
+    monkeypatch.setattr(rs, "POINTINGS_MAP_V1_3_PATH", map_path)
+    monkeypatch.setattr(rs, "POINTINGS_MAP_V2_0_PATH", map_path)
+
+    seen = {}
+    real_plot_coverage = rs.plot_coverage
+
+    def spy(ra, dec, **kwargs):
+        seen["n_pointings"] = len(ra)
+        return real_plot_coverage(ra, dec, **kwargs)
+
+    monkeypatch.setattr(rs, "plot_coverage", spy)
+    common = ["--display-res", "2", "--dpi", "40"]
+
+    def run(*args, name="x"):
+        return CliRunner().invoke(rs.main, [
+            str(npz), *args, *common, "--output-skymap", str(tmp_path / f"{name}_sky.png"),
+            "--output-coverage", str(tmp_path / f"{name}_cov.png")])
+
+    r = run("--from-after", "20260226", name="after")
+    assert r.exit_code == 0, r.output
+    assert "keeping 3/7 rows" in r.output
+    assert "2026-02-27 to 2026-03-01" in r.output      # Sun/Moon span follows the filter
+    assert seen["n_pointings"] == 1
+    assert (tmp_path / "after_sky.png").stat().st_size > 0
+
+    r = run("--from-before", "20260227", name="before")
+    assert r.exit_code == 0, r.output
+    assert "keeping 4/7 rows" in r.output
+    assert "2026-02-25 to 2026-02-26" in r.output
+    assert seen["n_pointings"] == 2
+
+    # no flags: unchanged behaviour, every row used
+    r = run(name="all")
+    assert r.exit_code == 0, r.output
+    assert "Date filter" not in r.output and "7 rows -> 2 unique pointings" in r.output
+
+    # misuse: bad date, empty window, window with no data
+    for args, expect in [(["--from-after", "2026-02-26"], "YYYYMMDD"),
+                         (["--from-after", "20260230"], "calendar date"),
+                         (["--from-after", "20260301", "--from-before", "20260301"], "no days"),
+                         (["--from-after", "20270101"], "No observations")]:
+        r = run(*args, name="bad")
+        assert r.exit_code != 0, r.output
+        assert expect in r.output
