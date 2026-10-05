@@ -19,9 +19,19 @@ Usage:
     python3 rednoise_skymap.py rednoise_dm_info.npz
     python3 rednoise_skymap.py rednoise_dm_info.npz --smooth-deg 1.0
         --output-skymap skymap.png --output-coverage coverage.png
+
+    Only use observations from part of the date range (dates are YYYYMMDD,
+    and both ends are exclusive):
+    python3 rednoise_skymap.py rednoise_dm_info.npz --from-after 20260226
+        (everything from Feb 27th 2026 onwards)
+    python3 rednoise_skymap.py rednoise_dm_info.npz --from-before 20260227
+        (everything up to and including Feb 26th 2026)
+    python3 rednoise_skymap.py rednoise_dm_info.npz --from-after 20260226 --from-before 20260401
+        (Feb 27th to Mar 31st 2026)
 '''
 
 import json
+from datetime import datetime
 from pathlib import Path
 
 import click
@@ -125,6 +135,61 @@ def nearest_pointing_values(tree, values, query_ra, query_dec, max_sep_deg=MAX_M
     return np.where(sep_deg <= max_sep_deg, matched, np.nan)
 
 
+def parse_yyyymmdd(value):
+    """
+    Validate a YYYYMMDD date given as a string or int (e.g. "20260226") and
+    return it as an int (20260226), the same form as the row dates built
+    from the DM info file's year/month/day columns.
+
+    Raises ValueError if it isn't 8 digits or isn't a real calendar date.
+    """
+    text = str(value).strip()
+    if len(text) != 8 or not text.isdigit():
+        raise ValueError(f"'{value}' is not a date in YYYYMMDD form (e.g. 20260226).")
+    try:
+        datetime.strptime(text, "%Y%m%d")
+    except ValueError:
+        raise ValueError(f"'{value}' is not a real calendar date (YYYYMMDD).") from None
+    return int(text)
+
+
+def date_filter_mask(year, month, day, from_after=None, from_before=None):
+    """
+    Which rows fall inside the requested date window. Both ends are
+    exclusive: from_after=20260226 keeps Feb 27th 2026 onwards, and
+    from_before=20260227 keeps up to and including Feb 26th 2026.
+
+    Inputs:
+    -------
+        year, month, day (arr): each row's observation date
+        from_after (int): YYYYMMDD; keep only rows dated after this day
+        from_before (int): YYYYMMDD; keep only rows dated before this day
+
+    Returns:
+    --------
+        keep (arr): bool, True for rows inside the window (all True if
+                    neither limit is given)
+    """
+    row_date = (np.asarray(year, dtype=np.int64) * 10000
+                + np.asarray(month, dtype=np.int64) * 100
+                + np.asarray(day, dtype=np.int64))
+    keep = np.ones(row_date.shape, dtype=bool)
+    if from_after is not None:
+        keep &= row_date > int(from_after)
+    if from_before is not None:
+        keep &= row_date < int(from_before)
+    return keep
+
+
+def _describe_date_window(from_after, from_before):
+    parts = []
+    if from_after is not None:
+        parts.append(f"after {from_after}")
+    if from_before is not None:
+        parts.append(f"before {from_before}")
+    return " and ".join(parts)
+
+
 def last_valid_bin(median_across_dms):
     """
     Each row's last non-pad frequency bin value. median_across_dms is
@@ -151,7 +216,8 @@ def last_valid_bin(median_across_dms):
 
 
 def load_data(npz_path: Path, pointings_map_v1_3_path: Path, pointings_map_v2_0_path: Path,
-              nchan_weight: bool = False, normalize: bool = False, plot_whitenoise: bool = False):
+              nchan_weight: bool = False, normalize: bool = False, plot_whitenoise: bool = False,
+              from_after=None, from_before=None):
     """
     This function loads the DM info file and returns the relevant contents.
 
@@ -177,6 +243,10 @@ def load_data(npz_path: Path, pointings_map_v1_3_path: Path, pointings_map_v2_0_
             noise, still Texp/Ndays-averaged the same way. Takes precedence
             over normalize (dividing the white noise level by itself is a
             no-op).
+        from_after (int): YYYYMMDD; only use observations dated after this
+            day (exclusive, so 20260226 means Feb 27th 2026 onwards)
+        from_before (int): YYYYMMDD; only use observations dated before
+            this day (exclusive)
 
     Returns:
     --------
@@ -190,6 +260,21 @@ def load_data(npz_path: Path, pointings_map_v1_3_path: Path, pointings_map_v2_0_
 
     info = data["info"]                         
     median_across_dms = data["median_across_dms"] 
+
+    # only keep observations inside the requested date window
+    if from_after is not None or from_before is not None:
+        in_window = date_filter_mask(info[:, 2], info[:, 3], info[:, 4],
+                                     from_after=from_after, from_before=from_before)
+        print(f"Date filter ({_describe_date_window(from_after, from_before)}): "
+              f"keeping {np.sum(in_window)}/{len(info)} rows.", flush=True)
+        if not np.any(in_window):
+            raise ValueError(
+                f"No observations dated {_describe_date_window(from_after, from_before)} "
+                f"in {npz_path}."
+            )
+        info = info[in_window]
+        median_across_dms = median_across_dms[in_window]
+
     ra = info[:, 0]
     dec = info[:, 1]
     year = info[:, 2].astype(int)
@@ -453,7 +538,7 @@ def _julian_date(year, month, day, hour=12.0):
     return np.floor(365.25 * (y + 4716)) + np.floor(30.6001 * (m + 1)) + day + b - 1524.5
 
 
-def observation_date_range(npz_path: Path):
+def observation_date_range(npz_path: Path, from_after=None, from_before=None):
     '''
     Daily Julian Date grid (local noon) spanning the first to last day of
     observation recorded in npz_path, for tracing the Sun/Moon over the
@@ -462,6 +547,9 @@ def observation_date_range(npz_path: Path):
     Inputs:
     -------
         npz_path (Path): path to the DM info file
+        from_after, from_before (int): same YYYYMMDD date window as
+            load_data(), so the Sun/Moon are traced over only the
+            observations actually plotted
 
     Returns:
     --------
@@ -470,6 +558,14 @@ def observation_date_range(npz_path: Path):
     data = np.load(npz_path)
     info = data["info"]
     year, month, day = info[:, 2].astype(int), info[:, 3].astype(int), info[:, 4].astype(int)
+
+    in_window = date_filter_mask(year, month, day, from_after=from_after, from_before=from_before)
+    if not np.any(in_window):
+        raise ValueError(
+            f"No observations dated {_describe_date_window(from_after, from_before)} "
+            f"in {npz_path}."
+        )
+    year, month, day = year[in_window], month[in_window], day[in_window]
     jd = _julian_date(year, month, day)
 
     # Sun/Moon are only traced across whatever span is actually in this
@@ -846,6 +942,13 @@ def plot_coverage(ra, dec, dpi=150, sun_path=None, moon_path=None, output_path=N
               help="Plot the white noise level (each row's last freq bin, "
                    "Texp/Ndays-averaged) instead of the summed red noise. "
                    "Takes precedence over --normalize.")
+@click.option("--from-after", "from_after", type=str, default=None, metavar="YYYYMMDD",
+              help="Only use observations dated after this day (exclusive): "
+                   "--from-after 20260226 plots everything from Feb 27th 2026 onwards.")
+@click.option("--from-before", "from_before", type=str, default=None, metavar="YYYYMMDD",
+              help="Only use observations dated before this day (exclusive): "
+                   "--from-before 20260227 plots everything up to Feb 26th 2026. "
+                   "Can be combined with --from-after.")
 @click.option("--title", "title", type=str, default=None,
               help="Override the skymap plot title (default depends on "
                    "--plot-whitenoise).")
@@ -854,23 +957,44 @@ def plot_coverage(ra, dec, dpi=150, sun_path=None, moon_path=None, output_path=N
 @click.option("--output-coverage", type=click.Path(dir_okay=False, path_type=Path), default=None,
               help="Save coverage map to this file (default: display).")
 def main(npz_file, smooth_deg, display_res, mask_radius_deg, dpi, nchan_weight, normalize,
-         plot_whitenoise, title, output_skymap, output_coverage):
+         plot_whitenoise, from_after, from_before, title, output_skymap, output_coverage):
     """
     Plot the CHAMPSS rednoise skymap and coverage map from NPZ_FILE (the
     rednoise_dm_info.npz produced by rednoise_dm_behavior.py). Pointing
     exposure lengths come from pointings_map_v1-3.json / pointings_map_v2-0.json
     in scripts/data/ (v1-3 for pointings before Feb 27 2026, v2-0 on/after).
     """
+    try:
+        from_after = parse_yyyymmdd(from_after) if from_after is not None else None
+        from_before = parse_yyyymmdd(from_before) if from_before is not None else None
+    except ValueError as e:
+        raise click.UsageError(str(e))
+    if from_after is not None and from_before is not None and from_after >= from_before:
+        raise click.UsageError(
+            f"--from-after {from_after} and --from-before {from_before} leave no days "
+            f"in between (both ends are exclusive)."
+        )
+
     for p in (POINTINGS_MAP_V1_3_PATH, POINTINGS_MAP_V2_0_PATH):
         if not p.exists():
             raise FileNotFoundError(f"Expected pointings map at {p}")
 
+    # an empty date window is a usage problem, not a crash -- report it cleanly
+    in_window = date_filter_mask(*np.load(npz_file)["info"][:, 2:5].T,
+                                 from_after=from_after, from_before=from_before)
+    if not np.any(in_window):
+        raise click.ClickException(
+            f"No observations dated {_describe_date_window(from_after, from_before)} "
+            f"in {npz_file}."
+        )
+
     ra, dec, mean_rn = load_data(npz_file, POINTINGS_MAP_V1_3_PATH, POINTINGS_MAP_V2_0_PATH,
                                   nchan_weight=nchan_weight, normalize=normalize,
-                                  plot_whitenoise=plot_whitenoise)
+                                  plot_whitenoise=plot_whitenoise,
+                                  from_after=from_after, from_before=from_before)
 
     print("Tracing Sun/Moon paths over the observation...", flush=True)
-    jd_grid = observation_date_range(npz_file)
+    jd_grid = observation_date_range(npz_file, from_after=from_after, from_before=from_before)
     sun_path = sun_radec(jd_grid)
     moon_path = moon_average_path(jd_grid)
 
