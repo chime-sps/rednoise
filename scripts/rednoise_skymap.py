@@ -469,7 +469,17 @@ def observation_date_range(npz_path: Path):
     '''
     data = np.load(npz_path)
     info = data["info"]
-    jd = _julian_date(info[:, 2].astype(int), info[:, 3].astype(int), info[:, 4].astype(int))
+    year, month, day = info[:, 2].astype(int), info[:, 3].astype(int), info[:, 4].astype(int)
+    jd = _julian_date(year, month, day)
+
+    # Sun/Moon are only traced across whatever span is actually in this
+    # file -- print it so it's obvious when that's less than a full year
+    # (i.e. the Sun's path will be a partial arc, not a closed loop).
+    i_min, i_max = np.argmin(jd), np.argmax(jd)
+    print(f" Observations span {year[i_min]}-{month[i_min]:02d}-{day[i_min]:02d} to "
+          f"{year[i_max]}-{month[i_max]:02d}-{day[i_max]:02d} ({jd.max() - jd.min():.0f} days) "
+          f"-- tracing Sun/Moon over that range.", flush=True)
+
     return np.arange(np.floor(jd.min()), np.floor(jd.max()) + 1.0) + 0.5
 
 
@@ -594,6 +604,59 @@ def moon_radec(jd):
     ra = np.rad2deg(np.arctan2(ye, xe)) % 360.0
     dec = np.rad2deg(np.arcsin(ze))
     return ra, dec
+
+
+MOON_SIDEREAL_MONTH_DAYS = 27.321661  # Moon's orbit around us, not the synodic (phase) month
+
+
+def moon_average_path(jd_grid, n_phase_bins=100):
+    '''
+    The Moon retraces almost the same RA/Dec loop every sidereal month, so
+    plotting its daily position over a multi-month observation just draws
+    the same curve over and over. This folds every day in jd_grid onto one
+    representative sidereal month (by day-of-cycle) and averages RA/Dec
+    within each phase bin, so a long observation still traces a single,
+    clean "average" Moon path instead of an overplotted smear.
+
+    Inputs:
+    -------
+        jd_grid (arr): Julian Dates to average over (e.g. from
+            observation_date_range())
+        n_phase_bins (int): number of bins across one sidereal month
+
+    Returns:
+    --------
+        ra_deg (arr), dec_deg (arr): one averaged point per populated phase
+            bin, in phase order (so it traces out as a single loop)
+    '''
+    ra, dec = moon_radec(jd_grid)
+    phase = np.mod(jd_grid, MOON_SIDEREAL_MONTH_DAYS)
+    bin_edges = np.linspace(0.0, MOON_SIDEREAL_MONTH_DAYS, n_phase_bins + 1)
+    bin_idx = np.clip(np.digitize(phase, bin_edges) - 1, 0, n_phase_bins - 1)
+
+    # RA wraps at 360 deg, so average it as a unit vector (circular mean),
+    # not arithmetically -- Dec never wraps, so a plain mean is fine there.
+    ra_r = np.deg2rad(ra)
+    sin_sum = np.zeros(n_phase_bins)
+    cos_sum = np.zeros(n_phase_bins)
+    dec_sum = np.zeros(n_phase_bins)
+    count = np.zeros(n_phase_bins)
+    np.add.at(sin_sum, bin_idx, np.sin(ra_r))
+    np.add.at(cos_sum, bin_idx, np.cos(ra_r))
+    np.add.at(dec_sum, bin_idx, dec)
+    np.add.at(count, bin_idx, 1)
+
+    has_data = count > 0
+    avg_ra = np.rad2deg(np.arctan2(sin_sum, cos_sum)) % 360.0
+    avg_dec = dec_sum / np.maximum(count, 1)
+
+    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+    order = np.argsort(bin_centers)
+    order = order[has_data[order]]
+
+    # close the loop back to the first point, since the average path is
+    # periodic over one sidereal month
+    return avg_ra[np.append(order, order[0])], avg_dec[np.append(order, order[0])]
 
 
 # -------
@@ -811,7 +874,7 @@ def main(npz_file, smooth_deg, display_res, mask_radius_deg, dpi, nchan_weight, 
     print("Tracing Sun/Moon paths over the observation...", flush=True)
     jd_grid = observation_date_range(npz_file)
     sun_path = sun_radec(jd_grid)
-    moon_path = moon_radec(jd_grid)
+    moon_path = moon_average_path(jd_grid)
 
     print("Plotting sky map...", flush=True)
     plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=display_res,
