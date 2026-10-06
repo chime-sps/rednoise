@@ -15,7 +15,7 @@ Tau A,"3C 144, Crab",05:34:31.9,+22:00:52,83.63,22.01,-6,1300,True,
 3C 196,,08:13:36.0,+48:13:03,123.40,48.22,33,38,False,
 Hydra A,3C 218,09:18:05.7,-12:05:44,139.52,-12.10,25,130,False,
 3C 237,,10:08:00.2,+07:29:12,152.00,7.49,47,13,False,S408 scaled from 3CR S178 with alpha=-0.7
-Cas A (alias),3C 461 below-pole N-S alias,11:23:24.0,+05:46:12,170.85,5.77,,4000,False,"CHIME ring-map alias: RA = Cas A + 12h; Dec frequency dependent (-29 at 510 MHz, +6 at 600, +19.4 at 679 [CHIME overview Fig. ringmap], +22 at 700, +33 at 800); no alias below ~505 MHz"
+#Cas A (alias),3C 461 below-pole N-S alias,11:23:24.0,+05:46:12,170.85,5.77,,4000,False,"CHIME ring-map alias: RA = Cas A + 12h; Dec frequency dependent (-29 at 510 MHz, +6 at 600, +19.4 at 679 [CHIME overview Fig. ringmap], +22 at 700, +33 at 800); no alias below ~505 MHz"
 3C 270,NGC 4261,12:19:23.2,+05:49:31,184.85,5.83,67,35,False,
 3C 273,,12:29:06.7,+02:03:09,187.28,2.05,64,55,False,
 Vir A,"3C 274, M87",12:30:49.4,+12:23:28,187.71,12.39,74,550,False,
