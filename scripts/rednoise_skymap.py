@@ -43,17 +43,8 @@ POINTINGS_MAP_DIR = Path(__file__).resolve().parent / "data"
 POINTINGS_MAP_V1_3_PATH = POINTINGS_MAP_DIR / "pointings_map_v1-3.json"
 POINTINGS_MAP_V2_0_PATH = POINTINGS_MAP_DIR / "pointings_map_v2-0.json"
 
-# bright radio continuum sources, for --bright-sources -- lives next to this
-# script, not in data/ (it's not a pointings map). Rename/move this constant
-# to match wherever it actually ends up in the repo.
-BRIGHT_SOURCES_PATH = Path(__file__).resolve().parent / "bright_sources.csv"
+BRIGHT_SOURCES_PATH = Path(__file__).resolve().parent / "data" / "bright_sources.csv"
 
-# exact (ra,dec) dict matching against the pointings map missed ~everything
-# (the map's own grid isn't even self-consistent to 4 decimal places between
-# v1-3 and v2-0), so we match nearest-neighbor instead, in 3D unit-vector
-# space (no RA wraparound / pole weirdness). 0.1 deg is comfortably above
-# the worst v1-3/v2-0 grid drift we've seen (~0.06 deg) and comfortably
-# below the spacing between genuinely different beams (~0.25 deg).
 MAX_MATCH_SEP_DEG = 0.1
 
 
