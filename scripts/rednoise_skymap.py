@@ -167,17 +167,17 @@ def load_data(npz_path: Path, pointings_map_v1_3_path: Path, pointings_map_v2_0_
             used for pointings on/after POINTINGS_MAP_CUTOVER
         nchan_weight (bool): if True, also weight rn_sum by 1/nchan per
             pointing (nchan looked up the same v1-3/v2-0 way as T_exp)
-        normalize (bool): if True, subtract each row's own last frequency
-            bin (the white noise level) from the summed power over freq
-            bins > 5 before normalizing by the number of (unpadded) bins
-            that went into that sum, so different days/pointings are
-            compared relative to their own noise floor rather than in
-            absolute power
+        normalize (bool): if True, divide each row's bin-averaged power
+            (summed over freq bins > 5, then normalized by the number of
+            unpadded bins that went into that sum) by its own last
+            frequency bin (the white noise level), so different
+            days/pointings are compared relative to their own noise floor
+            rather than in absolute power
         plot_whitenoise (bool): if True, plot the white noise level itself
             (each row's last real frequency bin) instead of the averaged
             red noise, still Texp/Ndays-averaged the same way. Takes
-            precedence over normalize (subtracting the white noise level
-            from itself is a no-op).
+            precedence over normalize (dividing the white noise level by
+            itself is a no-op).
 
     Returns:
     --------
@@ -214,13 +214,12 @@ def load_data(npz_path: Path, pointings_map_v1_3_path: Path, pointings_map_v2_0_
         # the same Texp/Ndays-weighted averaging below.
         rn_sum = last_valid_bin(median_across_dms)
     elif normalize:
-        # subtract each row's own white noise level (last freq bin) from
-        # the summed power *before* normalizing by the number of bins that
-        # went into that sum -- instead of the old approach of dividing by
-        # the white noise level.
+        # normalize the summed power by the number of bins that went into
+        # it, then divide by each row's own white noise level (last freq
+        # bin).
         last_bin = last_valid_bin(median_across_dms)
         with np.errstate(divide="ignore", invalid="ignore"):
-            rn_sum = (rn_sum - last_bin) / n_valid_bins
+            rn_sum = (rn_sum / n_valid_bins) / last_bin
     else:
         # always normalize the summed power by how many unpadded bins
         # actually went into it, so rows of differing real length are
@@ -735,7 +734,7 @@ def plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=0.25,
         plot_whitenoise (bool): if True, label as the white noise level instead
             of the bin-averaged red noise (mean_rn itself should already be
             computed accordingly by load_data)
-        normalize (bool): if True, label as white-noise-subtracted (mean_rn
+        normalize (bool): if True, label as white-noise-divided (mean_rn
             itself should already be computed accordingly by load_data)
         title (str): optional override for the plot title
         sun_path (tuple): optional (ra_deg, dec_deg) of the Sun over the
@@ -771,7 +770,7 @@ def plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=0.25,
     if plot_whitenoise:
         cbar_label_body = r'\left\langle\ P_{\mathrm{last~bin}}\ \right\rangle_{T_{\mathrm{exp}}}'
     elif normalize:
-        cbar_label_body = r'\left\langle\ \mathrm{median}_{\mathrm{DM}}\left(\langle P_f \rangle_{f>5} - P_{\mathrm{last~bin}}\right)\ \right\rangle_{T_{\mathrm{exp}}}'
+        cbar_label_body = r'\left\langle\ \mathrm{median}_{\mathrm{DM}}\left(\langle P_f \rangle_{f>5} / P_{\mathrm{last~bin}}\right)\ \right\rangle_{T_{\mathrm{exp}}}'
     else:
         cbar_label_body = r'\left\langle\ \mathrm{median}_{\mathrm{DM}}\left(\langle P_f \rangle_{f>5}\right)\ \right\rangle_{T_{\mathrm{exp}}}'
     if nchan_weight:
@@ -859,8 +858,8 @@ def plot_coverage(ra, dec, dpi=150, sun_path=None, moon_path=None, output_path=N
 @click.option("--nchan-weight", "nchan_weight", is_flag=True, default=False,
               help="Weight rednoise values by 1/nchan before plotting.")
 @click.option("--normalize", "normalize", is_flag=True, default=False,
-              help="Subtract each row's own last freq bin (white noise level) "
-                   "from its bin-averaged power, before averaging across days.")
+              help="Divide each row's bin-averaged power by its own last "
+                   "freq bin (white noise level), before averaging across days.")
 @click.option("--plot-whitenoise", "plot_whitenoise", is_flag=True, default=False,
               help="Plot the white noise level (each row's last freq bin, "
                    "Texp/Ndays-averaged) instead of the summed red noise. "
