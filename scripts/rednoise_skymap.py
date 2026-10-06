@@ -21,6 +21,7 @@ Usage:
         --output-skymap skymap.png --output-coverage coverage.png
 '''
 
+import csv
 import json
 from pathlib import Path
 
@@ -41,6 +42,11 @@ POINTINGS_MAP_CUTOVER = 20260227  # v1-3 before this date, v2-0 on/after
 POINTINGS_MAP_DIR = Path(__file__).resolve().parent / "data"
 POINTINGS_MAP_V1_3_PATH = POINTINGS_MAP_DIR / "pointings_map_v1-3.json"
 POINTINGS_MAP_V2_0_PATH = POINTINGS_MAP_DIR / "pointings_map_v2-0.json"
+
+# bright radio continuum sources, for --bright-sources -- lives next to this
+# script, not in data/ (it's not a pointings map). Rename/move this constant
+# to match wherever it actually ends up in the repo.
+BRIGHT_SOURCES_PATH = Path(__file__).resolve().parent / "bright_sources.csv"
 
 # exact (ra,dec) dict matching against the pointings map missed ~everything
 # (the map's own grid isn't even self-consistent to 4 decimal places between
@@ -148,6 +154,34 @@ def last_valid_bin(median_across_dms):
     row_idx = np.nonzero(has_valid)[0]
     last_bin[row_idx] = median_across_dms[row_idx, last_valid_idx[row_idx]]
     return last_bin
+
+
+def load_bright_sources(csv_path: Path):
+    """
+    For --bright-sources: load bright radio continuum source names and
+    positions from csv_path (name, ra_deg, dec_deg, ... columns -- see
+    bright_sources.csv), skipping its leading '#' comment lines.
+
+    Inputs:
+    -------
+        csv_path (Path): path to the bright sources CSV
+
+    Returns:
+    --------
+        names (list of str)
+        ra_deg (arr), dec_deg (arr)
+    """
+    print(f"Loading bright sources from {csv_path} ...", flush=True)
+    with open(csv_path, newline="") as f:
+        rows = csv.DictReader(line for line in f if not line.lstrip().startswith("#"))
+        names, ra_deg, dec_deg = [], [], []
+        for row in rows:
+            names.append(row["name"].strip())
+            ra_deg.append(float(row["ra_deg"]))
+            dec_deg.append(float(row["dec_deg"]))
+
+    print(f" {len(names)} bright sources loaded.", flush=True)
+    return names, np.array(ra_deg), np.array(dec_deg)
 
 
 def load_data(npz_path: Path, pointings_map_v1_3_path: Path, pointings_map_v2_0_path: Path,
@@ -691,6 +725,22 @@ def _plot_radec_path(ax, ra_deg, dec_deg, **kwargs):
     dec_rad = np.insert(dec_rad, seam, np.nan)
     ax.plot(lon_rad, dec_rad, **kwargs)
 
+
+def _plot_bright_sources(ax, names, ra_deg, dec_deg, color="cyan", fontsize=10):
+    '''
+    Mark each bright radio source with a small '+' and its name labeled
+    just above it, on our Mollweide axes.
+    '''
+    lon_rad = ra_deg_to_moll_rad(np.asarray(ra_deg))
+    dec_rad = dec_deg_to_moll_rad(np.asarray(dec_deg))
+    ax.scatter(lon_rad, dec_rad, marker="+", s=50, linewidths=1.3, color=color, zorder=6)
+
+    label_offset_rad = np.deg2rad(2.5)
+    for lon, dec, name in zip(lon_rad, dec_rad, names):
+        ax.text(lon, dec + label_offset_rad, name, ha="center", va="bottom",
+                fontsize=fontsize, color=color, zorder=6)
+
+
 def _setup_axes(dpi=150):
     '''
     This function sets up the figure and the Mollweide axes!
@@ -719,7 +769,8 @@ def _setup_axes(dpi=150):
 
 def plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=0.25,
                  mask_radius_deg=None, dpi=150, nchan_weight=False, plot_whitenoise=False,
-                 normalize=False, title=None, sun_path=None, moon_path=None, output_path=None):
+                 normalize=False, title=None, sun_path=None, moon_path=None,
+                 bright_sources=None, output_path=None):
     '''
     This function creates and then plots the rednoise skymap.
 
@@ -740,6 +791,8 @@ def plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=0.25,
         sun_path (tuple): optional (ra_deg, dec_deg) of the Sun over the
             observation, traced as a dashed line
         moon_path (tuple): same, for the Moon
+        bright_sources (tuple): optional (names, ra_deg, dec_deg) of bright
+            radio sources, marked and labeled just above their position
         output_path (str): optional path to save image if desired
     '''
     print("Gridding and smoothing ...", flush=True)
@@ -790,6 +843,9 @@ def plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=0.25,
     if sun_path is not None or moon_path is not None:
         ax.legend(loc="lower left", fontsize=12, framealpha=0.8)
 
+    if bright_sources is not None:
+        _plot_bright_sources(ax, bright_sources[0], bright_sources[1], bright_sources[2])
+
     plt.tight_layout()
 
     if output_path:
@@ -801,7 +857,8 @@ def plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=0.25,
     plt.close(fig)
 
 
-def plot_coverage(ra, dec, dpi=150, sun_path=None, moon_path=None, output_path=None):
+def plot_coverage(ra, dec, dpi=150, sun_path=None, moon_path=None, bright_sources=None,
+                   output_path=None):
     '''
     This function plots a dot on our Mollweide axes for each pointing with data.
 
@@ -812,6 +869,8 @@ def plot_coverage(ra, dec, dpi=150, sun_path=None, moon_path=None, output_path=N
         sun_path (tuple): optional (ra_deg, dec_deg) of the Sun over the
             observation, traced as a dashed line
         moon_path (tuple): same, for the Moon
+        bright_sources (tuple): optional (names, ra_deg, dec_deg) of bright
+            radio sources, marked and labeled just above their position
         output_path (str): optional path to save image if desired
     '''
     fig, ax = _setup_axes(dpi=dpi)
@@ -831,6 +890,10 @@ def plot_coverage(ra, dec, dpi=150, sun_path=None, moon_path=None, output_path=N
                           linewidth=1.5, zorder=5, label="Moon")
     if sun_path is not None or moon_path is not None:
         ax.legend(loc="lower left", fontsize=12, framealpha=0.8)
+
+    if bright_sources is not None:
+        _plot_bright_sources(ax, bright_sources[0], bright_sources[1], bright_sources[2],
+                              color="black")
 
     plt.tight_layout()
 
@@ -867,12 +930,15 @@ def plot_coverage(ra, dec, dpi=150, sun_path=None, moon_path=None, output_path=N
 @click.option("--title", "title", type=str, default=None,
               help="Override the skymap plot title (default depends on "
                    "--plot-whitenoise).")
+@click.option("--bright-sources", "bright_sources", is_flag=True, default=False,
+              help="Label bright radio continuum sources (from bright_sources.csv "
+                   "next to this script) just above their position.")
 @click.option("--output-skymap", type=click.Path(dir_okay=False, path_type=Path), default=None,
               help="Save sky map to this file (default: display).")
 @click.option("--output-coverage", type=click.Path(dir_okay=False, path_type=Path), default=None,
               help="Save coverage map to this file (default: display).")
 def main(npz_file, smooth_deg, display_res, mask_radius_deg, dpi, nchan_weight, normalize,
-         plot_whitenoise, title, output_skymap, output_coverage):
+         plot_whitenoise, title, bright_sources, output_skymap, output_coverage):
     """
     Plot the CHAMPSS rednoise skymap and coverage map from NPZ_FILE (the
     rednoise_dm_info.npz produced by rednoise_dm_behavior.py). Pointing
@@ -892,15 +958,22 @@ def main(npz_file, smooth_deg, display_res, mask_radius_deg, dpi, nchan_weight, 
     sun_path = sun_radec(jd_grid)
     moon_path = moon_average_path(jd_grid)
 
+    bright_source_info = None
+    if bright_sources:
+        if not BRIGHT_SOURCES_PATH.exists():
+            raise FileNotFoundError(f"Expected bright sources CSV at {BRIGHT_SOURCES_PATH}")
+        bright_source_info = load_bright_sources(BRIGHT_SOURCES_PATH)
+
     print("Plotting sky map...", flush=True)
     plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=display_res,
                 mask_radius_deg=mask_radius_deg, dpi=dpi, nchan_weight=nchan_weight,
                 plot_whitenoise=plot_whitenoise, normalize=normalize, title=title,
-                sun_path=sun_path, moon_path=moon_path, output_path=output_skymap)
+                sun_path=sun_path, moon_path=moon_path, bright_sources=bright_source_info,
+                output_path=output_skymap)
 
     print("Plotting coverage map...", flush=True)
     plot_coverage(ra, dec, dpi=dpi, sun_path=sun_path, moon_path=moon_path,
-                  output_path=output_coverage)
+                  bright_sources=bright_source_info, output_path=output_coverage)
 
 
 if __name__ == "__main__":
