@@ -4,7 +4,7 @@ This module reads a rednoise DM median file + a full rednoise file
 and produces the following plots:
 
     1. Rednoise skymap: exposure time-weighted mean over Ndays, median over DM, and
-    sum over f_bin > 5 of rednoise power
+    sum over f > 0.05 Hz of rednoise power
     2. Coverage skymap: one dot per pointing to show current coverage of info
 
 NOTE FOR ROBERT AND LARS:
@@ -43,9 +43,24 @@ POINTINGS_MAP_DIR = Path(__file__).resolve().parent / "data"
 POINTINGS_MAP_V1_3_PATH = POINTINGS_MAP_DIR / "pointings_map_v1-3.json"
 POINTINGS_MAP_V2_0_PATH = POINTINGS_MAP_DIR / "pointings_map_v2-0.json"
 
-BRIGHT_SOURCES_PATH = Path(__file__).resolve().parent / "data" / "bright_sources.csv"
+# bright radio continuum sources, for --bright-sources -- lives next to this
+# script, not in data/ (it's not a pointings map). Rename/move this constant
+# to match wherever it actually ends up in the repo.
+BRIGHT_SOURCES_PATH = Path(__file__).resolve().parent / "bright_sources.csv"
 
+# exact (ra,dec) dict matching against the pointings map missed ~everything
+# (the map's own grid isn't even self-consistent to 4 decimal places between
+# v1-3 and v2-0), so we match nearest-neighbor instead, in 3D unit-vector
+# space (no RA wraparound / pole weirdness). 0.1 deg is comfortably above
+# the worst v1-3/v2-0 grid drift we've seen (~0.06 deg) and comfortably
+# below the spacing between genuinely different beams (~0.25 deg).
 MAX_MATCH_SEP_DEG = 0.1
+
+# red noise power is summed (then bin-averaged) over frequencies strictly
+# above this, rather than over a fixed set of bins -- since frequency
+# resolution df = 1/T_exp varies row to row, the bin index this corresponds
+# to is computed per row in load_data() (bin k is at frequency k/T_exp).
+RN_FREQ_MIN_HZ = 0.05
 
 
 def _radec_to_xyz(ra, dec):
@@ -193,9 +208,9 @@ def load_data(npz_path: Path, pointings_map_v1_3_path: Path, pointings_map_v2_0_
         nchan_weight (bool): if True, also weight rn_sum by 1/nchan per
             pointing (nchan looked up the same v1-3/v2-0 way as T_exp)
         normalize (bool): if True, divide each row's bin-averaged power
-            (summed over freq bins > 5, then normalized by the number of
-            unpadded bins that went into that sum) by its own last
-            frequency bin (the white noise level), so different
+            (summed over freq > RN_FREQ_MIN_HZ, then normalized by the
+            number of unpadded bins that went into that sum) by its own
+            last frequency bin (the white noise level), so different
             days/pointings are compared relative to their own noise floor
             rather than in absolute power
         plot_whitenoise (bool): if True, plot the white noise level itself
@@ -215,23 +230,51 @@ def load_data(npz_path: Path, pointings_map_v1_3_path: Path, pointings_map_v2_0_
     print(f"Loading {npz_path} ...", flush=True)
     data = np.load(npz_path)
 
-    info = data["info"]                         
-    median_across_dms = data["median_across_dms"] 
+    info = data["info"]
+    median_across_dms = data["median_across_dms"]
     ra = info[:, 0]
     dec = info[:, 1]
     year = info[:, 2].astype(int)
     month = info[:, 3].astype(int)
     day = info[:, 4].astype(int)
 
-    # sum (and count) of only the real, unpadded bins past freq bin 5.
-    # median_across_dms is padded out to a fixed width with 0 or -1, so a
-    # plain np.sum(median_across_dms[:, 5:]) lets -1 padding corrupt the
-    # sum, and a plain bin count (shape[1] - 5) overcounts for any row
-    # shorter than the longest one -- mask the pad out of both.
+    # Texp lookup moved up here (used to happen after the bin sum/average
+    # below) because the RN_FREQ_MIN_HZ cutoff is per-row: frequency
+    # resolution df = 1/T_exp varies row to row (different pointings/days
+    # have different exposure lengths), so converting "f > RN_FREQ_MIN_HZ"
+    # into a bin index needs each row's own T_exp first.
+    tree_v1_3, length_v1_3, nchans_v1_3 = load_pointing_map_tree(pointings_map_v1_3_path)
+    tree_v2_0, length_v2_0, nchans_v2_0 = load_pointing_map_tree(pointings_map_v2_0_path)
+
+    row_date = year * 10000 + month * 100 + day
+    before_cutover = row_date < POINTINGS_MAP_CUTOVER
+
+    # if/else on the pointing's date: v1-3 before the cutover, v2-0 on/after
+    length_matched_v1_3 = nearest_pointing_values(tree_v1_3, length_v1_3, ra, dec)
+    length_matched_v2_0 = nearest_pointing_values(tree_v2_0, length_v2_0, ra, dec)
+    t_exp = np.where(before_cutover, length_matched_v1_3, length_matched_v2_0) * TSAMP
+
+    n_missing = np.sum(np.isnan(t_exp))
+    if n_missing:
+        print(f"{n_missing} pointings not in the Texp dict.", flush=True)
+        t_exp = np.where(np.isnan(t_exp), 1.0, t_exp)
+
+    # sum (and count) of only the real, unpadded bins at frequencies above
+    # RN_FREQ_MIN_HZ. median_across_dms is padded out to a fixed width with
+    # 0 or -1, so a plain sum lets padding corrupt it, and a naive bin count
+    # overcounts for any row shorter than the longest one -- mask the pad
+    # out of both. The frequency cutoff is a per-row bin index rather than
+    # a fixed one: bin k sits at frequency k/T_exp, so the first bin
+    # strictly above RN_FREQ_MIN_HZ is floor(RN_FREQ_MIN_HZ * T_exp) + 1.
     is_pad = (median_across_dms == 0.0) | (median_across_dms == -1.0)
-    valid_tail = ~is_pad[:, 5:]
-    n_valid_bins = np.sum(valid_tail, axis=1)
-    rn_sum = np.sum(np.where(valid_tail, median_across_dms[:, 5:], 0.0), axis=1)
+    n_bins = median_across_dms.shape[1]
+    freq_cutoff_idx = np.clip(
+        np.floor(RN_FREQ_MIN_HZ * t_exp).astype(np.int64) + 1, 0, n_bins
+    )
+    col = np.arange(n_bins)
+    valid_mask = (col[None, :] >= freq_cutoff_idx[:, None]) & ~is_pad
+    n_valid_bins = np.sum(valid_mask, axis=1)
+    rn_sum = np.sum(np.where(valid_mask, median_across_dms, 0.0), axis=1)
 
     if plot_whitenoise:
         # plot the white noise level itself (each row's last real freq
@@ -265,22 +308,8 @@ def load_data(npz_path: Path, pointings_map_v1_3_path: Path, pointings_map_v2_0_
         ra, dec = ra[keep], dec[keep]
         year, month, day = year[keep], month[keep], day[keep]
         rn_sum = rn_sum[keep]
-
-    tree_v1_3, length_v1_3, nchans_v1_3 = load_pointing_map_tree(pointings_map_v1_3_path)
-    tree_v2_0, length_v2_0, nchans_v2_0 = load_pointing_map_tree(pointings_map_v2_0_path)
-
-    row_date = year * 10000 + month * 100 + day
-    before_cutover = row_date < POINTINGS_MAP_CUTOVER
-
-    # if/else on the pointing's date: v1-3 before the cutover, v2-0 on/after
-    length_matched_v1_3 = nearest_pointing_values(tree_v1_3, length_v1_3, ra, dec)
-    length_matched_v2_0 = nearest_pointing_values(tree_v2_0, length_v2_0, ra, dec)
-    t_exp = np.where(before_cutover, length_matched_v1_3, length_matched_v2_0) * TSAMP
-
-    n_missing = np.sum(np.isnan(t_exp))
-    if n_missing:
-        print(f"{n_missing} pointings not in the Texp dict.", flush=True)
-        t_exp = np.where(np.isnan(t_exp), 1.0, t_exp)
+        t_exp = t_exp[keep]
+        before_cutover = before_cutover[keep]
 
     if nchan_weight:
         nchan_matched_v1_3 = nearest_pointing_values(tree_v1_3, nchans_v1_3, ra, dec)
@@ -814,9 +843,9 @@ def plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=0.25,
     if plot_whitenoise:
         cbar_label_body = r'\left\langle\ P_{\mathrm{last~bin}}\ \right\rangle_{T_{\mathrm{exp}}}'
     elif normalize:
-        cbar_label_body = r'\left\langle\ \mathrm{median}_{\mathrm{DM}}\left(\langle P_f \rangle_{f>5} / P_{\mathrm{last~bin}}\right)\ \right\rangle_{T_{\mathrm{exp}}}'
+        cbar_label_body = r'\left\langle\ \mathrm{median}_{\mathrm{DM}}\left(\langle P_f \rangle_{f>0.05\,\mathrm{Hz}} / P_{\mathrm{last~bin}}\right)\ \right\rangle_{T_{\mathrm{exp}}}'
     else:
-        cbar_label_body = r'\left\langle\ \mathrm{median}_{\mathrm{DM}}\left(\langle P_f \rangle_{f>5}\right)\ \right\rangle_{T_{\mathrm{exp}}}'
+        cbar_label_body = r'\left\langle\ \mathrm{median}_{\mathrm{DM}}\left(\langle P_f \rangle_{f>0.05\,\mathrm{Hz}}\right)\ \right\rangle_{T_{\mathrm{exp}}}'
     if nchan_weight:
         cbar_label_body += r' / N_{\mathrm{chan}}'
     cbar.set_label(f'${cbar_label_body}$', fontsize=16)
