@@ -30,7 +30,7 @@ from scipy.spatial import cKDTree
 
 # my obsessive matplotlib formatting:
 import matplotlib.pyplot as plt
-plt.rcParams.update({'font.size': 14})
+plt.rcParams.update({'font.size': 17})
 import matplotlib as mpl
 mpl.rcParams['font.family'] = 'monospace'
 from matplotlib.colors import Normalize, LogNorm
@@ -708,11 +708,11 @@ def _setup_axes(dpi=150):
     label_dec_rad = np.deg2rad(-15)
     for lon_rad, label in zip(hour_ticks_rad, ra_hour_labels):
         ax.text(lon_rad, label_dec_rad, f"{label:.0f}h",
-                ha="center", va="top", fontsize=14, color="black")
+                ha="center", va="top", fontsize=17, color="black")
 
-    ax.set_xlabel("Right Ascension", labelpad=14, fontsize=13)
-    ax.set_ylabel("Declination (deg)", fontsize=13)
-    ax.tick_params(axis="y", labelsize=11)
+    ax.set_xlabel("Right Ascension", labelpad=14, fontsize=16)
+    ax.set_ylabel("Declination (deg)", fontsize=16)
+    ax.tick_params(axis="y", labelsize=13)
 
     return fig, ax
 
@@ -775,11 +775,11 @@ def plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=0.25,
         cbar_label_body = r'\left\langle\ \mathrm{median}_{\mathrm{DM}}\left(\langle P_f \rangle_{f>5}\right)\ \right\rangle_{T_{\mathrm{exp}}}'
     if nchan_weight:
         cbar_label_body += r' / N_{\mathrm{chan}}'
-    cbar.set_label(f'${cbar_label_body}$', fontsize=13)
+    cbar.set_label(f'${cbar_label_body}$', fontsize=16)
 
     default_title = ('Skymap of White Noise Across CHAMPSS Observing Period' if plot_whitenoise
                       else 'Skymap of Rednoise Across CHAMPSS Observing Period')
-    ax.set_title(title or default_title, fontsize=20, fontweight='bold')
+    ax.set_title(title or default_title, fontsize=24, fontweight='bold')
 
     if sun_path is not None:
         _plot_radec_path(ax, sun_path[0], sun_path[1], linestyle="--", color="gold",
@@ -788,7 +788,7 @@ def plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=0.25,
         _plot_radec_path(ax, moon_path[0], moon_path[1], linestyle="--", color="silver",
                           linewidth=1.5, zorder=5, label="Moon")
     if sun_path is not None or moon_path is not None:
-        ax.legend(loc="lower left", fontsize=10, framealpha=0.8)
+        ax.legend(loc="lower left", fontsize=12, framealpha=0.8)
 
     plt.tight_layout()
 
@@ -821,7 +821,7 @@ def plot_coverage(ra, dec, dpi=150, sun_path=None, moon_path=None, output_path=N
 
     ax.scatter(ra_moll, dec_moll, c="hotpink",
                s=1.5, alpha=0.5, linewidths=0, rasterized=True)
-    ax.set_title(f'Pointing Coverage Map', fontsize=20, fontweight='bold')
+    ax.set_title(f'Pointing Coverage Map', fontsize=24, fontweight='bold')
 
     if sun_path is not None:
         _plot_radec_path(ax, sun_path[0], sun_path[1], linestyle="--", color="gold",
@@ -830,7 +830,7 @@ def plot_coverage(ra, dec, dpi=150, sun_path=None, moon_path=None, output_path=N
         _plot_radec_path(ax, moon_path[0], moon_path[1], linestyle="--", color="silver",
                           linewidth=1.5, zorder=5, label="Moon")
     if sun_path is not None or moon_path is not None:
-        ax.legend(loc="lower left", fontsize=10, framealpha=0.8)
+        ax.legend(loc="lower left", fontsize=12, framealpha=0.8)
 
     plt.tight_layout()
 
