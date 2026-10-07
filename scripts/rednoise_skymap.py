@@ -57,10 +57,21 @@ BRIGHT_SOURCES_PATH = Path(__file__).resolve().parent / "bright_sources.csv"
 MAX_MATCH_SEP_DEG = 0.1
 
 # red noise power is summed (then bin-averaged) over frequencies strictly
-# above this, rather than over a fixed set of bins -- since frequency
-# resolution df = 1/T_exp varies row to row, the bin index this corresponds
-# to is computed per row in load_data() (bin k is at frequency k/T_exp).
+# above this, rather than over a fixed set of bins. median_across_dms's
+# columns are REBINNED bins -- each stored bin j is an average over
+# scale[j] raw (pre-rebinning) FFT bins, with the raw bins running from
+# 0 Hz (bin 0) up to the Nyquist frequency. So a given row's raw frequency
+# resolution is df_row = NYQUIST_FREQ_HZ / Nbins_row, where Nbins_row is
+# the sum of that row's valid "scale" entries (the total number of raw
+# bins before rebinning), and stored bin j starts at raw-bin index
+# cumsum(scale[:j]) -- i.e. frequency cumsum(scale[:j]) * df_row. See
+# load_data() for the per-row computation.
 RN_FREQ_MIN_HZ = 0.05
+
+# Nyquist frequency of the raw (pre-rebinning) time series -- a single
+# instrumental constant (depends only on the raw sample rate TSAMP), not
+# per-row like df_row above.
+NYQUIST_FREQ_HZ = 1.0 / (2.0 * TSAMP)
 
 
 def _radec_to_xyz(ra, dec):
@@ -238,41 +249,48 @@ def load_data(npz_path: Path, pointings_map_v1_3_path: Path, pointings_map_v2_0_
     month = info[:, 3].astype(int)
     day = info[:, 4].astype(int)
 
-    # Texp lookup moved up here (used to happen after the bin sum/average
-    # below) because the RN_FREQ_MIN_HZ cutoff is per-row: frequency
-    # resolution df = 1/T_exp varies row to row (different pointings/days
-    # have different exposure lengths), so converting "f > RN_FREQ_MIN_HZ"
-    # into a bin index needs each row's own T_exp first.
-    tree_v1_3, length_v1_3, nchans_v1_3 = load_pointing_map_tree(pointings_map_v1_3_path)
-    tree_v2_0, length_v2_0, nchans_v2_0 = load_pointing_map_tree(pointings_map_v2_0_path)
+    # "scale" is the per-pointing rebinning info carried through from the
+    # combined medians file (see rednoise_dm_behavior.py): median_across_dms's
+    # columns are REBINNED bins, where stored bin j is an average over
+    # scale[row, j] raw (pre-rebinning) FFT bins. It's -1 padded past each
+    # row's valid n_freq entries, same convention as median_across_dms.
+    try:
+        scale = data["scale"]
+    except KeyError:
+        raise KeyError(
+            f"{npz_path} has no 'scale' array -- it's required to convert "
+            f"RN_FREQ_MIN_HZ into a per-row bin cutoff (see load_data())."
+        )
 
-    row_date = year * 10000 + month * 100 + day
-    before_cutover = row_date < POINTINGS_MAP_CUTOVER
+    # Each row's raw (pre-rebinning) frequency resolution is
+    # df_row = NYQUIST_FREQ_HZ / Nbins_row, where Nbins_row is the sum of
+    # that row's valid scale entries (the total raw bin count before
+    # rebinning) and NYQUIST_FREQ_HZ is a fixed instrumental constant (same
+    # for every row -- it depends only on the raw sample rate). The first
+    # stored bin is 0 Hz; stored bin j starts cumsum(scale[:j]) raw bins in,
+    # i.e. at frequency cumsum(scale[:j]) * df_row.
+    is_pad_scale = (scale == -1.0)
+    scale_filled = np.where(is_pad_scale, 0.0, scale)
+    n_bins_raw = np.sum(scale_filled, axis=1)
 
-    # if/else on the pointing's date: v1-3 before the cutover, v2-0 on/after
-    length_matched_v1_3 = nearest_pointing_values(tree_v1_3, length_v1_3, ra, dec)
-    length_matched_v2_0 = nearest_pointing_values(tree_v2_0, length_v2_0, ra, dec)
-    t_exp = np.where(before_cutover, length_matched_v1_3, length_matched_v2_0) * TSAMP
+    n_missing_scale = np.sum(n_bins_raw <= 0)
+    if n_missing_scale:
+        print(f"{n_missing_scale} row(s) have no valid 'scale' entries "
+              f"(can't locate RN_FREQ_MIN_HZ -- will be dropped).", flush=True)
 
-    n_missing = np.sum(np.isnan(t_exp))
-    if n_missing:
-        print(f"{n_missing} pointings not in the Texp dict.", flush=True)
-        t_exp = np.where(np.isnan(t_exp), 1.0, t_exp)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        df_raw = NYQUIST_FREQ_HZ / n_bins_raw  # (N,) Hz per raw bin, per row
+
+    cum_raw_bins = np.cumsum(scale_filled, axis=1) - scale_filled  # exclusive cumsum
+    freq_at_bin = cum_raw_bins * df_raw[:, None]  # (N, max_n_freq) Hz
 
     # sum (and count) of only the real, unpadded bins at frequencies above
     # RN_FREQ_MIN_HZ. median_across_dms is padded out to a fixed width with
     # 0 or -1, so a plain sum lets padding corrupt it, and a naive bin count
     # overcounts for any row shorter than the longest one -- mask the pad
-    # out of both. The frequency cutoff is a per-row bin index rather than
-    # a fixed one: bin k sits at frequency k/T_exp, so the first bin
-    # strictly above RN_FREQ_MIN_HZ is floor(RN_FREQ_MIN_HZ * T_exp) + 1.
+    # out of both, on top of the frequency cutoff above.
     is_pad = (median_across_dms == 0.0) | (median_across_dms == -1.0)
-    n_bins = median_across_dms.shape[1]
-    freq_cutoff_idx = np.clip(
-        np.floor(RN_FREQ_MIN_HZ * t_exp).astype(np.int64) + 1, 0, n_bins
-    )
-    col = np.arange(n_bins)
-    valid_mask = (col[None, :] >= freq_cutoff_idx[:, None]) & ~is_pad
+    valid_mask = (freq_at_bin > RN_FREQ_MIN_HZ) & ~is_pad
     n_valid_bins = np.sum(valid_mask, axis=1)
     rn_sum = np.sum(np.where(valid_mask, median_across_dms, 0.0), axis=1)
 
@@ -308,8 +326,22 @@ def load_data(npz_path: Path, pointings_map_v1_3_path: Path, pointings_map_v2_0_
         ra, dec = ra[keep], dec[keep]
         year, month, day = year[keep], month[keep], day[keep]
         rn_sum = rn_sum[keep]
-        t_exp = t_exp[keep]
-        before_cutover = before_cutover[keep]
+
+    tree_v1_3, length_v1_3, nchans_v1_3 = load_pointing_map_tree(pointings_map_v1_3_path)
+    tree_v2_0, length_v2_0, nchans_v2_0 = load_pointing_map_tree(pointings_map_v2_0_path)
+
+    row_date = year * 10000 + month * 100 + day
+    before_cutover = row_date < POINTINGS_MAP_CUTOVER
+
+    # if/else on the pointing's date: v1-3 before the cutover, v2-0 on/after
+    length_matched_v1_3 = nearest_pointing_values(tree_v1_3, length_v1_3, ra, dec)
+    length_matched_v2_0 = nearest_pointing_values(tree_v2_0, length_v2_0, ra, dec)
+    t_exp = np.where(before_cutover, length_matched_v1_3, length_matched_v2_0) * TSAMP
+
+    n_missing = np.sum(np.isnan(t_exp))
+    if n_missing:
+        print(f"{n_missing} pointings not in the Texp dict.", flush=True)
+        t_exp = np.where(np.isnan(t_exp), 1.0, t_exp)
 
     if nchan_weight:
         nchan_matched_v1_3 = nearest_pointing_values(tree_v1_3, nchans_v1_3, ra, dec)
