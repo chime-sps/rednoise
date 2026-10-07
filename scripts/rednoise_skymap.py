@@ -754,12 +754,11 @@ def _plot_radec_path(ax, ra_deg, dec_deg, **kwargs):
 
 def _plot_bright_sources(ax, names, ra_deg, dec_deg, color="cyan", fontsize=10):
     '''
-    Mark each bright radio source with a small '+' and its name labeled
-    just above it, on our Mollweide axes.
+    Label each bright radio source with its name, just above its position,
+    on our Mollweide axes.
     '''
     lon_rad = ra_deg_to_moll_rad(np.asarray(ra_deg))
     dec_rad = dec_deg_to_moll_rad(np.asarray(dec_deg))
-    ax.scatter(lon_rad, dec_rad, marker="+", s=50, linewidths=1.3, color=color, zorder=6)
 
     label_offset_rad = np.deg2rad(2.5)
     for lon, dec, name in zip(lon_rad, dec_rad, names):
@@ -818,7 +817,7 @@ def plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=0.25,
             observation, traced as a dashed line
         moon_path (tuple): same, for the Moon
         bright_sources (tuple): optional (names, ra_deg, dec_deg) of bright
-            radio sources, marked and labeled just above their position
+            radio sources, labeled just above their position
         output_path (str): optional path to save image if desired
     '''
     print("Gridding and smoothing ...", flush=True)
@@ -896,7 +895,7 @@ def plot_coverage(ra, dec, dpi=150, sun_path=None, moon_path=None, bright_source
             observation, traced as a dashed line
         moon_path (tuple): same, for the Moon
         bright_sources (tuple): optional (names, ra_deg, dec_deg) of bright
-            radio sources, marked and labeled just above their position
+            radio sources, labeled just above their position
         output_path (str): optional path to save image if desired
     '''
     fig, ax = _setup_axes(dpi=dpi)
