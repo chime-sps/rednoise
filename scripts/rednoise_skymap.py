@@ -218,6 +218,9 @@ def load_data(npz_path: Path, pointings_map_v1_3_path: Path, pointings_map_v2_0_
         Dec (arr) : Dec of each pointing
         mean_rn (arr): exposure-weighted mean across days of (per-row)
             mean across unpadded freq bins of median across DMs
+        mean_mjd (arr): exposure-weighted mean MJD across the days that
+            went into that same pointing's mean_rn -- i.e. the mean date
+            of the data behind each skymap pixel, for --output-coverage
     """
 
     print(f"Loading {npz_path} ...", flush=True)
@@ -368,11 +371,17 @@ def load_data(npz_path: Path, pointings_map_v1_3_path: Path, pointings_map_v2_0_
 
         rn_sum = rn_sum / nchan
 
+    # each row's Julian Date (local noon) -- used below to give each
+    # pointing's skymap pixel the same T_exp-weighted mean *date* (as MJD)
+    # as the mean_rn value it was built from, for --output-coverage.
+    jd_row = _julian_date(year, month, day)
+
     pointing_keys = np.round(ra, 4) * 1000 + np.round(dec, 4)
     unique_keys, inv = np.unique(pointing_keys, return_inverse=True)
     n_pointings = len(unique_keys)
 
     mean_rn = np.zeros(n_pointings, dtype=np.float64)
+    mean_jd = np.zeros(n_pointings, dtype=np.float64)
     weight_sum = np.zeros(n_pointings, dtype=np.float64)
     count = np.zeros(n_pointings, dtype=np.int32)
     ra_pt = np.zeros(n_pointings, dtype=np.float64)   # basically the mean RA across near matches
@@ -381,20 +390,24 @@ def load_data(npz_path: Path, pointings_map_v1_3_path: Path, pointings_map_v2_0_
     # weight each day's contribution to its pointing's mean by that day's T_exp
     # wrong?
     np.add.at(mean_rn, inv, rn_sum * t_exp)
+    np.add.at(mean_jd, inv, jd_row * t_exp)
     np.add.at(weight_sum, inv, t_exp)
     np.add.at(count, inv, 1)
     np.add.at(ra_pt, inv, ra)
     np.add.at(dec_pt, inv, dec)
 
     mean_rn /= np.maximum(weight_sum, np.finfo(np.float64).tiny)
+    mean_jd /= np.maximum(weight_sum, np.finfo(np.float64).tiny)
     ra_pt /= np.maximum(count, 1)
     dec_pt /= np.maximum(count, 1)
+
+    mean_mjd = mean_jd - 2400000.5  # JD -> MJD
 
     print(f" {len(info)} rows -> {n_pointings} unique pointings.", flush=True)
     print(f" RA range: {ra_pt.min():.2f} -- {ra_pt.max():.2f} deg", flush=True)
     print(f" Dec range: {dec_pt.min():.2f} -- {dec_pt.max():.2f} deg", flush=True)
 
-    return ra_pt, dec_pt, mean_rn
+    return ra_pt, dec_pt, mean_rn, mean_mjd
 
 
 # --------
@@ -941,15 +954,20 @@ def plot_skymap(ra, dec, mean_rn, smooth_deg, display_res=0.25,
     plt.close(fig)
 
 
-def plot_coverage(ra, dec, dpi=150, sun_path=None, moon_path=None, bright_sources=None,
+def plot_coverage(ra, dec, mjd=None, dpi=150, sun_path=None, moon_path=None, bright_sources=None,
                    output_path=None):
     '''
-    This function plots a dot on our Mollweide axes for each pointing with data.
+    This function plots a dot on our Mollweide axes for each pointing with data,
+    color-coded by mjd (the exposure-weighted mean MJD of the data behind that
+    same pointing's pixel in the accompanying rednoise skymap) when given.
 
     Inputs:
     -------
         ra (arr)
         dec (arr)
+        mjd (arr): optional, same order as ra/dec -- exposure-weighted mean
+            MJD per pointing (load_data()'s mean_mjd). Color-codes each dot
+            with a colorbar; falls back to a plain uncolored dot if omitted.
         sun_path (tuple): optional (ra_deg, dec_deg) of the Sun over the
             observation, traced as a dashed line
         moon_path (tuple): same, for the Moon
@@ -962,8 +980,15 @@ def plot_coverage(ra, dec, dpi=150, sun_path=None, moon_path=None, bright_source
     ra_moll = ra_deg_to_moll_rad(ra)
     dec_moll = dec_deg_to_moll_rad(dec)
 
-    ax.scatter(ra_moll, dec_moll, c="hotpink",
-               s=1.5, alpha=0.5, linewidths=0, rasterized=True)
+    if mjd is not None:
+        sc = ax.scatter(ra_moll, dec_moll, c=mjd, cmap="viridis",
+                         s=2.5, alpha=0.85, linewidths=0, rasterized=True)
+        cbar = fig.colorbar(sc, ax=ax, pad=0.02, shrink=0.8, orientation="vertical")
+        cbar.set_label("MJD", fontsize=16)
+    else:
+        ax.scatter(ra_moll, dec_moll, c="hotpink",
+                   s=1.5, alpha=0.5, linewidths=0, rasterized=True)
+
     ax.set_title(f'Pointing Coverage Map', fontsize=24, fontweight='bold')
 
     if sun_path is not None:
@@ -1041,10 +1066,10 @@ def main(npz_file, smooth_deg, display_res, mask_radius_deg, dpi, nchan_weight, 
         if not p.exists():
             raise FileNotFoundError(f"Expected pointings map at {p}")
 
-    ra, dec, mean_rn = load_data(npz_file, POINTINGS_MAP_V1_3_PATH, POINTINGS_MAP_V2_0_PATH,
-                                  nchan_weight=nchan_weight, normalize=normalize,
-                                  plot_whitenoise=plot_whitenoise,
-                                  from_before=from_before, from_after=from_after)
+    ra, dec, mean_rn, mean_mjd = load_data(npz_file, POINTINGS_MAP_V1_3_PATH, POINTINGS_MAP_V2_0_PATH,
+                                            nchan_weight=nchan_weight, normalize=normalize,
+                                            plot_whitenoise=plot_whitenoise,
+                                            from_before=from_before, from_after=from_after)
 
     print("Tracing Sun/Moon paths over the observation...", flush=True)
     jd_grid = observation_date_range(npz_file, from_before=from_before, from_after=from_after)
@@ -1065,7 +1090,7 @@ def main(npz_file, smooth_deg, display_res, mask_radius_deg, dpi, nchan_weight, 
                 output_path=output_skymap)
 
     print("Plotting coverage map...", flush=True)
-    plot_coverage(ra, dec, dpi=dpi, sun_path=sun_path, moon_path=moon_path,
+    plot_coverage(ra, dec, mjd=mean_mjd, dpi=dpi, sun_path=sun_path, moon_path=moon_path,
                   bright_sources=bright_source_info, output_path=output_coverage)
 
 
