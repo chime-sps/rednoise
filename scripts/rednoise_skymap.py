@@ -42,35 +42,9 @@ POINTINGS_MAP_CUTOVER = 20260227  # v1-3 before this date, v2-0 on/after
 POINTINGS_MAP_DIR = Path(__file__).resolve().parent / "data"
 POINTINGS_MAP_V1_3_PATH = POINTINGS_MAP_DIR / "pointings_map_v1-3.json"
 POINTINGS_MAP_V2_0_PATH = POINTINGS_MAP_DIR / "pointings_map_v2-0.json"
-
-# bright radio continuum sources, for --bright-sources -- lives next to this
-# script, not in data/ (it's not a pointings map). Rename/move this constant
-# to match wherever it actually ends up in the repo.
-BRIGHT_SOURCES_PATH = Path(__file__).resolve().parent / "bright_sources.csv"
-
-# exact (ra,dec) dict matching against the pointings map missed ~everything
-# (the map's own grid isn't even self-consistent to 4 decimal places between
-# v1-3 and v2-0), so we match nearest-neighbor instead, in 3D unit-vector
-# space (no RA wraparound / pole weirdness). 0.1 deg is comfortably above
-# the worst v1-3/v2-0 grid drift we've seen (~0.06 deg) and comfortably
-# below the spacing between genuinely different beams (~0.25 deg).
+BRIGHT_SOURCES_PATH = Path(__file__).resolve().parent / data/ "bright_sources.csv"
 MAX_MATCH_SEP_DEG = 0.1
-
-# red noise power is summed (then bin-averaged) over frequencies strictly
-# above this, rather than over a fixed set of bins. median_across_dms's
-# columns are REBINNED bins -- each stored bin j is an average over
-# scale[j] raw (pre-rebinning) FFT bins, with the raw bins running from
-# 0 Hz (bin 0) up to the Nyquist frequency. So a given row's raw frequency
-# resolution is df_row = NYQUIST_FREQ_HZ / Nbins_row, where Nbins_row is
-# the sum of that row's valid "scale" entries (the total number of raw
-# bins before rebinning), and stored bin j starts at raw-bin index
-# cumsum(scale[:j]) -- i.e. frequency cumsum(scale[:j]) * df_row. See
-# load_data() for the per-row computation.
 RN_FREQ_MIN_HZ = 0.05
-
-# Nyquist frequency of the raw (pre-rebinning) time series -- a single
-# instrumental constant (depends only on the raw sample rate TSAMP), not
-# per-row like df_row above.
 NYQUIST_FREQ_HZ = 1.0 / (2.0 * TSAMP)
 
 
